@@ -1,0 +1,6 @@
+{
+  "name": "Hydraulic Hose Handbook",
+  "description": "Offline-first Hydraulic Hose Ebook reader with Google Drive sync, technical chapters, offline search, and bookmarks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

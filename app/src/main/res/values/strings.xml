@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Hydraulic Hose</string>
+    <string name="offline_reading_banner">Offline - reading saved data</string>
+    <string name="online_status_synced">Online - Up to date</string>
+    <string name="sync_now">Sync Now</string>
+    <string name="sync_settings">Drive Sync Settings</string>
+    <string name="search_hint">Search chapters, fittings, topics…</string>
+    <string name="bookmarks">Bookmarks</string>
+    <string name="all_chapters">All Chapters</string>
+</resources>
