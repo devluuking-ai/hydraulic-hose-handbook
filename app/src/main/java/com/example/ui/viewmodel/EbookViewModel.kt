@@ -300,6 +300,16 @@ class EbookViewModel(application: Application) : AndroidViewModel(application) {
         _syncStatusMessage.value = "Admin Drive configuration saved."
     }
 
+    fun saveDriveSettings(folderId: String, apiKey: String, customUrl: String) {
+        saveAdminDriveSettings(
+            folderId = folderId,
+            apiKey = apiKey,
+            oauthToken = _oauthToken.value,
+            uploadEndpoint = _uploadEndpoint.value,
+            customUrl = customUrl
+        )
+    }
+
     // Admin Add / Edit Article
     fun saveArticle(
         article: Chapter,

@@ -17,6 +17,7 @@ import androidx.navigation.compose.rememberNavController
 import com.example.ui.screens.AdminScreen
 import com.example.ui.screens.DetailScreen
 import com.example.ui.screens.HomeScreen
+import com.example.ui.screens.SettingsScreen
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.viewmodel.EbookViewModel
 
@@ -108,6 +109,14 @@ fun EbookApp(viewModel: EbookViewModel) {
                     }
                 }
             }
+        }
+        composable("settings") {
+            SettingsScreen(
+                viewModel = viewModel,
+                onBackClick = {
+                    navController.popBackStack()
+                }
+            )
         }
     }
 }
