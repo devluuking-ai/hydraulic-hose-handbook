@@ -164,7 +164,7 @@ object MMKVStorage {
                         action = obj.getString("action"),
                         articleId = obj.getString("articleId"),
                         title = obj.getString("title"),
-                        localImageName = obj.optString("localImageName", null),
+                        localImageName = obj.optString("localImageName").takeIf { it.isNotBlank() },
                         timestamp = obj.optLong("timestamp", System.currentTimeMillis())
                     )
                 )

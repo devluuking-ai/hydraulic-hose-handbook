@@ -96,7 +96,7 @@ class SyncRepository(private val context: Context) {
             val category = item.optString("category", "General")
             val order = item.optInt("order", i + 1)
             val readingTime = item.optInt("readingTimeMinutes", 5)
-            val thumbnail = item.optString("thumbnail", item.optString("image", null))
+            val thumbnail = item.optString("thumbnail").ifBlank { item.optString("image") }.takeIf { it.isNotBlank() }
             val summary = item.optString("summary", "")
             val source = item.optString("source", defaultSource)
             val uploadStatus = item.optString("uploadStatus", "SAVED_TO_DRIVE")
@@ -117,11 +117,11 @@ class SyncRepository(private val context: Context) {
                         ChapterSection(
                             heading = secObj.optString("heading", ""),
                             text = secObj.optString("text", ""),
-                            image = secObj.optString("image", null).takeIf { it?.isNotBlank() == true },
-                            caption = secObj.optString("caption", null).takeIf { it?.isNotBlank() == true },
+                            image = secObj.optString("image").takeIf { it.isNotBlank() },
+                            caption = secObj.optString("caption").takeIf { it.isNotBlank() },
                             calloutType = calloutType,
-                            calloutTitle = secObj.optString("calloutTitle", null).takeIf { it?.isNotBlank() == true },
-                            calloutText = secObj.optString("calloutText", null).takeIf { it?.isNotBlank() == true }
+                            calloutTitle = secObj.optString("calloutTitle").takeIf { it.isNotBlank() },
+                            calloutText = secObj.optString("calloutText").takeIf { it.isNotBlank() }
                         )
                     )
                 }
