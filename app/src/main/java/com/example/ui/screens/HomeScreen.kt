@@ -44,6 +44,11 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.example.ui.components.PinLockDialog
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -71,7 +76,7 @@ import com.example.ui.viewmodel.EbookViewModel
 fun HomeScreen(
     viewModel: EbookViewModel,
     onChapterClick: (Chapter) -> Unit,
-    onSettingsClick: () -> Unit,
+    onAdminUnlocked: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val displayedChapters by viewModel.displayedChapters.collectAsState()
@@ -82,8 +87,24 @@ fun HomeScreen(
     val lastSyncTime by viewModel.lastSyncTime.collectAsState()
     val isSyncing by viewModel.isSyncing.collectAsState()
     val syncProgressText by viewModel.syncProgressText.collectAsState()
+    val isPinDialogVisible by viewModel.isPinDialogVisible.collectAsState()
+
+    var tapCount by remember { mutableIntStateOf(0) }
+    var lastTapTime by remember { mutableLongStateOf(0L) }
 
     val bookmarkedCount = allChapters.count { it.isBookmarked }
+
+    if (isPinDialogVisible) {
+        PinLockDialog(
+            viewModel = viewModel,
+            onSuccess = {
+                onAdminUnlocked()
+            },
+            onDismiss = {
+                viewModel.dismissPinDialog()
+            }
+        )
+    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -92,7 +113,26 @@ fun HomeScreen(
             Column {
                 TopAppBar(
                     title = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastTapTime < 800) {
+                                        tapCount++
+                                        if (tapCount >= 5) {
+                                            tapCount = 0
+                                            viewModel.triggerPinDialog()
+                                        }
+                                    } else {
+                                        tapCount = 1
+                                    }
+                                    lastTapTime = now
+                                }
+                                .padding(vertical = 4.dp, horizontal = 4.dp)
+                                .testTag("app_title_logo_header")
+                        ) {
                             Box(
                                 modifier = Modifier
                                     .size(34.dp)
@@ -125,18 +165,6 @@ fun HomeScreen(
                                     )
                                 )
                             }
-                        }
-                    },
-                    actions = {
-                        IconButton(
-                            onClick = onSettingsClick,
-                            modifier = Modifier.testTag("settings_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Settings,
-                                contentDescription = "Drive Sync Settings",
-                                tint = Color.White
-                            )
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(

@@ -1,7 +1,10 @@
 package com.example
 
 import com.example.data.DefaultChapters
+import com.example.model.Chapter
+import com.example.model.PendingUpload
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -60,5 +63,61 @@ class ExampleUnitTest {
         assertEquals("1aBcDeFgHiJk", extract("1aBcDeFgHiJk"))
         assertEquals("1aBcDeFgHiJk", extract(" https://drive.google.com/drive/folders/1aBcDeFgHiJk?usp=sharing "))
         assertEquals("1aBcDeFgHiJk", extract("https://drive.google.com/open?id=1aBcDeFgHiJk"))
+    }
+
+    @Test
+    fun pinLockoutLogic_simulation() {
+        var failedAttempts = 0
+        var lockoutUntil = 0L
+        val correctPin = "1234"
+
+        fun verify(input: String, now: Long): Boolean {
+            if (now < lockoutUntil) return false
+            if (input == correctPin) {
+                failedAttempts = 0
+                return true
+            } else {
+                failedAttempts++
+                if (failedAttempts >= 3) {
+                    lockoutUntil = now + 30_000L
+                }
+                return false
+            }
+        }
+
+        val t0 = 1000000L
+        // 1st wrong attempt
+        assertFalse(verify("0000", t0))
+        assertEquals(1, failedAttempts)
+
+        // 2nd wrong attempt
+        assertFalse(verify("1111", t0 + 1000))
+        assertEquals(2, failedAttempts)
+
+        // 3rd wrong attempt -> triggers 30s lockout
+        assertFalse(verify("2222", t0 + 2000))
+        assertEquals(3, failedAttempts)
+        assertEquals(t0 + 32000L, lockoutUntil)
+
+        // Even with correct PIN, must be rejected during 30s lockout
+        assertFalse(verify("1234", t0 + 15000))
+
+        // After 30s expires, correct PIN is accepted and resets failed attempts
+        assertTrue(verify("1234", t0 + 33000))
+        assertEquals(0, failedAttempts)
+    }
+
+    @Test
+    fun pendingUploads_modelVerification() {
+        val upload = PendingUpload(
+            id = "test-123",
+            action = "UPSERT",
+            articleId = "art-456",
+            title = "Test Article",
+            localImageName = "art_test.jpg"
+        )
+        assertEquals("UPSERT", upload.action)
+        assertEquals("art-456", upload.articleId)
+        assertEquals("art_test.jpg", upload.localImageName)
     }
 }

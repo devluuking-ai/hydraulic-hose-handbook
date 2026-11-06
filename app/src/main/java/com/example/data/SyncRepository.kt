@@ -7,14 +7,18 @@ import android.util.Log
 import com.example.model.CalloutType
 import com.example.model.Chapter
 import com.example.model.ChapterSection
+import com.example.model.PendingUpload
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 sealed class SyncResult {
@@ -51,7 +55,7 @@ class SyncRepository(private val context: Context) {
         if (contentJsonFile.exists() && contentJsonFile.length() > 0) {
             try {
                 val jsonString = contentJsonFile.readText()
-                val parsed = parseChaptersJson(jsonString, source = "drive")
+                val parsed = parseChaptersJson(jsonString, defaultSource = "drive")
                 if (parsed.isNotEmpty()) {
                     return parsed.map { ch ->
                         ch.copy(isBookmarked = bookmarks.contains(ch.id))
@@ -68,7 +72,7 @@ class SyncRepository(private val context: Context) {
         }
     }
 
-    private fun parseChaptersJson(jsonString: String, source: String): List<Chapter> {
+    private fun parseChaptersJson(jsonString: String, defaultSource: String): List<Chapter> {
         val chapters = mutableListOf<Chapter>()
         val trimmed = jsonString.trim()
 
@@ -89,10 +93,13 @@ class SyncRepository(private val context: Context) {
             val id = item.optString("id", "chapter_$i")
             val title = item.optString("title", "Untitled Chapter")
             val subtitle = item.optString("subtitle", "")
+            val category = item.optString("category", "General")
             val order = item.optInt("order", i + 1)
             val readingTime = item.optInt("readingTimeMinutes", 5)
             val thumbnail = item.optString("thumbnail", item.optString("image", null))
             val summary = item.optString("summary", "")
+            val source = item.optString("source", defaultSource)
+            val uploadStatus = item.optString("uploadStatus", "SAVED_TO_DRIVE")
 
             val sections = mutableListOf<ChapterSection>()
             if (item.has("sections")) {
@@ -134,16 +141,415 @@ class SyncRepository(private val context: Context) {
                     id = id,
                     title = title,
                     subtitle = subtitle,
+                    category = category,
                     order = order,
                     readingTimeMinutes = readingTime,
                     thumbnail = thumbnail,
                     summary = summary,
                     sections = sections,
-                    source = source
+                    source = source,
+                    uploadStatus = uploadStatus
                 )
             )
         }
         return chapters.sortedBy { it.order }
+    }
+
+    private fun serializeChaptersToJson(chapters: List<Chapter>): String {
+        val root = JSONObject()
+        root.put("version", 2)
+        root.put("lastUpdated", System.currentTimeMillis())
+
+        val array = JSONArray()
+        for (ch in chapters) {
+            val obj = JSONObject()
+            obj.put("id", ch.id)
+            obj.put("title", ch.title)
+            obj.put("subtitle", ch.subtitle)
+            obj.put("category", ch.category)
+            obj.put("order", ch.order)
+            obj.put("readingTimeMinutes", ch.readingTimeMinutes)
+            obj.put("thumbnail", ch.thumbnail ?: "")
+            obj.put("summary", ch.summary)
+            obj.put("source", ch.source)
+            obj.put("uploadStatus", ch.uploadStatus)
+
+            val secArray = JSONArray()
+            for (sec in ch.sections) {
+                val secObj = JSONObject()
+                secObj.put("heading", sec.heading)
+                secObj.put("text", sec.text)
+                secObj.put("image", sec.image ?: "")
+                secObj.put("caption", sec.caption ?: "")
+                secObj.put("calloutType", sec.calloutType.name)
+                secObj.put("calloutTitle", sec.calloutTitle ?: "")
+                secObj.put("calloutText", sec.calloutText ?: "")
+                secArray.put(secObj)
+            }
+            obj.put("sections", secArray)
+            array.put(obj)
+        }
+        root.put("chapters", array)
+        return root.toString(2)
+    }
+
+    /**
+     * Admin: Save or update an article from inside APK.
+     * Writes image & content.json to internal filesDir, updates MMKV,
+     * attempts Drive upload, or queues for offline upload.
+     */
+    suspend fun saveOrUpdateArticle(
+        article: Chapter,
+        imageBytes: ByteArray?,
+        imageExtension: String = "jpg"
+    ): Pair<Chapter, String> = withContext(Dispatchers.IO) {
+        // 1. If new image bytes were provided, save to filesDir/hydraulic_content/
+        var updatedThumbnail = article.thumbnail
+        if (imageBytes != null && imageBytes.isNotEmpty()) {
+            val safeTitle = article.title.lowercase().replace("[^a-z0-9]".toRegex(), "_").take(15)
+            val imgFileName = "art_${safeTitle}_${System.currentTimeMillis()}.$imageExtension"
+            val imgFile = File(contentDir, imgFileName)
+            imgFile.writeBytes(imageBytes)
+            updatedThumbnail = imgFileName
+            MMKVStorage.addToFileList(imgFileName)
+        }
+
+        // 2. Load existing chapters, replace or add
+        val currentChapters = loadChapters().toMutableList()
+        val existingIndex = currentChapters.indexOfFirst { it.id == article.id }
+
+        val determinedOrder = if (existingIndex >= 0) {
+            article.order
+        } else {
+            (currentChapters.maxOfOrNull { it.order } ?: 0) + 1
+        }
+
+        val articleToSave = article.copy(
+            thumbnail = updatedThumbnail,
+            order = determinedOrder,
+            source = if (article.source == "builtin") "admin" else article.source
+        )
+
+        if (existingIndex >= 0) {
+            currentChapters[existingIndex] = articleToSave
+        } else {
+            currentChapters.add(articleToSave)
+        }
+
+        // 3. Save updated content.json to filesDir
+        val contentJsonFile = File(contentDir, "content.json")
+        val jsonString = serializeChaptersToJson(currentChapters)
+        contentJsonFile.writeText(jsonString)
+
+        // 4. Update MMKV
+        val now = System.currentTimeMillis()
+        MMKVStorage.addToFileList("content.json")
+        MMKVStorage.saveLastSyncTime(now)
+        val syncIndex = JSONObject(MMKVStorage.getSyncIndex()).apply {
+            put("content.json", now.toString())
+            if (updatedThumbnail != null) put(updatedThumbnail, now.toString())
+        }
+        MMKVStorage.saveSyncIndex(syncIndex.toString())
+
+        // 5. Check Drive upload readiness
+        val isNetAvailable = isOnline()
+        val folderId = extractFolderId(MMKVStorage.getFolderId())
+        val oauthToken = MMKVStorage.getDriveOAuthToken()
+        val uploadEndpoint = MMKVStorage.getDriveUploadEndpoint()
+
+        var statusMessage = ""
+        var finalUploadStatus = "SAVED_OFFLINE"
+
+        if (!isNetAvailable) {
+            finalUploadStatus = "SAVED_OFFLINE"
+            statusMessage = "Saved offline, will upload when online"
+            MMKVStorage.addPendingUpload(
+                PendingUpload(
+                    id = UUID.randomUUID().toString(),
+                    action = "UPSERT",
+                    articleId = articleToSave.id,
+                    title = articleToSave.title,
+                    localImageName = updatedThumbnail
+                )
+            )
+        } else if (folderId.isNotEmpty() && (oauthToken.isNotEmpty() || uploadEndpoint.isNotEmpty())) {
+            // Attempt upload to Google Drive
+            val uploadSuccess = uploadToDrive(articleToSave, updatedThumbnail, jsonString, folderId, oauthToken, uploadEndpoint)
+            if (uploadSuccess) {
+                finalUploadStatus = "SAVED_TO_DRIVE"
+                statusMessage = "Saved to Drive"
+            } else {
+                finalUploadStatus = "SAVED_OFFLINE"
+                statusMessage = "Drive upload queued (will auto-retry)"
+                MMKVStorage.addPendingUpload(
+                    PendingUpload(
+                        id = UUID.randomUUID().toString(),
+                        action = "UPSERT",
+                        articleId = articleToSave.id,
+                        title = articleToSave.title,
+                        localImageName = updatedThumbnail
+                    )
+                )
+            }
+        } else {
+            // No Drive write credentials configured yet
+            finalUploadStatus = "SAVED_OFFLINE"
+            statusMessage = "Saved offline (configure Drive write credentials to sync to cloud)"
+            MMKVStorage.addPendingUpload(
+                PendingUpload(
+                    id = UUID.randomUUID().toString(),
+                    action = "UPSERT",
+                    articleId = articleToSave.id,
+                    title = articleToSave.title,
+                    localImageName = updatedThumbnail
+                )
+            )
+        }
+
+        // Update the article's uploadStatus in the local file
+        val finalArticle = articleToSave.copy(uploadStatus = finalUploadStatus)
+        val reUpdatedChapters = currentChapters.map { if (it.id == finalArticle.id) finalArticle else it }
+        contentJsonFile.writeText(serializeChaptersToJson(reUpdatedChapters))
+
+        return@withContext Pair(finalArticle, statusMessage)
+    }
+
+    /**
+     * Admin: Delete an article.
+     * Removes from content.json, removes associated image, updates MMKV,
+     * updates Drive or queues deletion.
+     */
+    suspend fun deleteArticle(articleId: String): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        val currentChapters = loadChapters().toMutableList()
+        val target = currentChapters.find { it.id == articleId } ?: return@withContext Pair(false, "Article not found")
+
+        // If local custom image exists, remove it
+        if (!target.thumbnail.isNullOrBlank()) {
+            val imgFile = File(contentDir, target.thumbnail)
+            if (imgFile.exists()) {
+                imgFile.delete()
+                MMKVStorage.removeFromFileList(target.thumbnail)
+            }
+        }
+
+        currentChapters.removeAll { it.id == articleId }
+
+        // Update content.json
+        val contentJsonFile = File(contentDir, "content.json")
+        val jsonString = serializeChaptersToJson(currentChapters)
+        contentJsonFile.writeText(jsonString)
+
+        val now = System.currentTimeMillis()
+        MMKVStorage.saveLastSyncTime(now)
+
+        val isNetAvailable = isOnline()
+        val folderId = extractFolderId(MMKVStorage.getFolderId())
+        val oauthToken = MMKVStorage.getDriveOAuthToken()
+        val uploadEndpoint = MMKVStorage.getDriveUploadEndpoint()
+
+        var msg = "Deleted locally."
+        if (isNetAvailable && folderId.isNotEmpty() && (oauthToken.isNotEmpty() || uploadEndpoint.isNotEmpty())) {
+            uploadContentJsonToDrive(jsonString, folderId, oauthToken, uploadEndpoint)
+            msg = "Deleted from local cache and Drive."
+        } else {
+            MMKVStorage.addPendingUpload(
+                PendingUpload(
+                    id = UUID.randomUUID().toString(),
+                    action = "DELETE",
+                    articleId = articleId,
+                    title = target.title
+                )
+            )
+            msg = "Deleted locally, Drive deletion queued."
+        }
+
+        return@withContext Pair(true, msg)
+    }
+
+    /**
+     * Upload an article and content.json to Google Drive.
+     */
+    private fun uploadToDrive(
+        article: Chapter,
+        imageFileName: String?,
+        contentJsonString: String,
+        folderId: String,
+        oauthToken: String,
+        uploadEndpoint: String
+    ): Boolean {
+        try {
+            // Upload image first if present
+            if (!imageFileName.isNullOrBlank()) {
+                val imgFile = File(contentDir, imageFileName)
+                if (imgFile.exists()) {
+                    uploadFileToDrive(imgFile, folderId, oauthToken, uploadEndpoint)
+                }
+            }
+
+            // Upload updated content.json
+            return uploadContentJsonToDrive(contentJsonString, folderId, oauthToken, uploadEndpoint)
+        } catch (e: Exception) {
+            Log.e("SyncRepository", "Drive upload error: ${e.message}", e)
+            return false
+        }
+    }
+
+    private fun uploadFileToDrive(
+        file: File,
+        folderId: String,
+        oauthToken: String,
+        uploadEndpoint: String
+    ): Boolean {
+        try {
+            if (uploadEndpoint.isNotEmpty()) {
+                // Post to custom webhook or Google Apps Script Web App
+                val requestBody = file.readBytes().toRequestBody("application/octet-stream".toMediaTypeOrNull())
+                val req = Request.Builder()
+                    .url("$uploadEndpoint?filename=${file.name}&folderId=$folderId")
+                    .post(requestBody)
+                    .build()
+                val resp = client.newCall(req).execute()
+                return resp.isSuccessful
+            }
+
+            if (oauthToken.isNotEmpty()) {
+                // Drive v3 multipart upload
+                val boundary = "=====" + System.currentTimeMillis() + "====="
+                val metadata = JSONObject().apply {
+                    put("name", file.name)
+                    put("parents", JSONArray().put(folderId))
+                }
+
+                val bodyStr = "--$boundary\r\n" +
+                        "Content-Type: application/json; charset=UTF-8\r\n\r\n" +
+                        metadata.toString() + "\r\n" +
+                        "--$boundary\r\n" +
+                        "Content-Type: image/jpeg\r\n\r\n"
+
+                val bodyEnd = "\r\n--$boundary--\r\n"
+                val bodyBytes = bodyStr.toByteArray() + file.readBytes() + bodyEnd.toByteArray()
+
+                val reqBody = bodyBytes.toRequestBody("multipart/related; boundary=$boundary".toMediaTypeOrNull())
+                val req = Request.Builder()
+                    .url("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart")
+                    .header("Authorization", "Bearer $oauthToken")
+                    .post(reqBody)
+                    .build()
+
+                val resp = client.newCall(req).execute()
+                return resp.isSuccessful
+            }
+        } catch (e: Exception) {
+            Log.e("SyncRepository", "Error uploading file ${file.name}", e)
+        }
+        return false
+    }
+
+    private fun uploadContentJsonToDrive(
+        contentJsonString: String,
+        folderId: String,
+        oauthToken: String,
+        uploadEndpoint: String
+    ): Boolean {
+        try {
+            if (uploadEndpoint.isNotEmpty()) {
+                val reqBody = contentJsonString.toRequestBody("application/json".toMediaTypeOrNull())
+                val req = Request.Builder()
+                    .url("$uploadEndpoint?filename=content.json&folderId=$folderId")
+                    .post(reqBody)
+                    .build()
+                val resp = client.newCall(req).execute()
+                return resp.isSuccessful
+            }
+
+            if (oauthToken.isNotEmpty()) {
+                val boundary = "=====" + System.currentTimeMillis() + "====="
+                val metadata = JSONObject().apply {
+                    put("name", "content.json")
+                    put("parents", JSONArray().put(folderId))
+                }
+
+                val bodyStr = "--$boundary\r\n" +
+                        "Content-Type: application/json; charset=UTF-8\r\n\r\n" +
+                        metadata.toString() + "\r\n" +
+                        "--$boundary\r\n" +
+                        "Content-Type: application/json\r\n\r\n" +
+                        contentJsonString + "\r\n" +
+                        "--$boundary--\r\n"
+
+                val reqBody = bodyStr.toRequestBody("multipart/related; boundary=$boundary".toMediaTypeOrNull())
+                val req = Request.Builder()
+                    .url("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart")
+                    .header("Authorization", "Bearer $oauthToken")
+                    .post(reqBody)
+                    .build()
+
+                val resp = client.newCall(req).execute()
+                return resp.isSuccessful
+            }
+        } catch (e: Exception) {
+            Log.e("SyncRepository", "Error uploading content.json", e)
+        }
+        return false
+    }
+
+    /**
+     * Process pending offline upload queue
+     */
+    suspend fun processPendingUploads(): Int = withContext(Dispatchers.IO) {
+        if (!isOnline()) return@withContext 0
+
+        val queue = MMKVStorage.getPendingUploads()
+        if (queue.isEmpty()) return@withContext 0
+
+        val folderId = extractFolderId(MMKVStorage.getFolderId())
+        val oauthToken = MMKVStorage.getDriveOAuthToken()
+        val uploadEndpoint = MMKVStorage.getDriveUploadEndpoint()
+
+        if (folderId.isEmpty() || (oauthToken.isEmpty() && uploadEndpoint.isEmpty())) {
+            return@withContext 0
+        }
+
+        var successCount = 0
+        val contentJsonFile = File(contentDir, "content.json")
+        val currentJson = if (contentJsonFile.exists()) contentJsonFile.readText() else ""
+
+        for (item in queue) {
+            try {
+                if (item.action == "UPSERT") {
+                    if (!item.localImageName.isNullOrBlank()) {
+                        val imgFile = File(contentDir, item.localImageName)
+                        if (imgFile.exists()) {
+                            uploadFileToDrive(imgFile, folderId, oauthToken, uploadEndpoint)
+                        }
+                    }
+                    if (currentJson.isNotEmpty()) {
+                        uploadContentJsonToDrive(currentJson, folderId, oauthToken, uploadEndpoint)
+                    }
+                    MMKVStorage.removePendingUpload(item.id)
+                    successCount++
+                } else if (item.action == "DELETE") {
+                    if (currentJson.isNotEmpty()) {
+                        uploadContentJsonToDrive(currentJson, folderId, oauthToken, uploadEndpoint)
+                    }
+                    MMKVStorage.removePendingUpload(item.id)
+                    successCount++
+                }
+            } catch (e: Exception) {
+                Log.e("SyncRepository", "Failed to process queue item ${item.id}", e)
+            }
+        }
+
+        if (successCount > 0) {
+            // Update chapters uploadStatus to SAVED_TO_DRIVE
+            val chapters = loadChapters().map { ch ->
+                if (ch.uploadStatus == "SAVED_OFFLINE") ch.copy(uploadStatus = "SAVED_TO_DRIVE") else ch
+            }
+            contentJsonFile.writeText(serializeChaptersToJson(chapters))
+            MMKVStorage.saveLastSyncTime(System.currentTimeMillis())
+        }
+
+        return@withContext successCount
     }
 
     suspend fun syncFromDrive(
@@ -254,10 +660,8 @@ class SyncRepository(private val context: Context) {
         folderId: String,
         onProgress: (String) -> Unit
     ): SyncResult {
-        // Without an API Key, Google Drive folder listing requires an API key or a web app endpoint.
-        // Let's attempt to check if a content.json is directly accessible or prompt clearly.
         onProgress("Checking public Drive link...")
-        val msg = "Google Drive folder sync requires a free Google Drive API Key to query folder contents without user login. Please add an API Key in Settings, or use 'Load Demo Cloud Update' to test full sync."
+        val msg = "Google Drive folder sync requires a free Google Drive API Key to query folder contents without user login. Please add an API Key in Admin Settings, or use 'Load Demo Cloud Update' to test full sync."
         MMKVStorage.saveSyncResult("notice", msg)
         return SyncResult.Failure(msg)
     }
@@ -289,16 +693,11 @@ class SyncRepository(private val context: Context) {
         return SyncResult.Success("Synced content.json successfully", 1)
     }
 
-    /**
-     * Demo sync generator: Creates an updated cloud handbook package in internal storage (filesDir),
-     * demonstrating additional chapters (Field Troubleshooting & Pressure Spikes, Crimper Calibration),
-     * updating MMKV sync index, file list, and last sync timestamp.
-     */
     suspend fun loadDemoCloudUpdate(onProgress: (String) -> Unit): SyncResult = withContext(Dispatchers.IO) {
         onProgress("Initializing demo cloud data packet...")
-        kotlinx.coroutines.delay(400)
+        kotlinx.coroutines.delay(300)
         onProgress("Formatting content.json with 7 complete chapters...")
-        kotlinx.coroutines.delay(400)
+        kotlinx.coroutines.delay(300)
 
         val demoChaptersJson = """
         {
@@ -311,6 +710,7 @@ class SyncRepository(private val context: Context) {
               "order": 1,
               "title": "Chapter 1: Introduction to Hydraulic Hoses",
               "subtitle": "Principles of High-Pressure Fluid Power (Updated v2.1)",
+              "category": "Fundamentals",
               "readingTimeMinutes": 4,
               "thumbnail": "img_hose_intro",
               "summary": "Updated guide with added pressure envelope charts: inner tube, reinforcement layers, and outer cover, plus working pressure vs burst pressure design safety factors.",
@@ -335,6 +735,7 @@ class SyncRepository(private val context: Context) {
               "order": 2,
               "title": "Chapter 2: Hydraulic Hose Types & Ratings",
               "subtitle": "SAE Specifications, Wire Braid vs. Spiral",
+              "category": "Hose Types",
               "readingTimeMinutes": 5,
               "thumbnail": "img_hose_types",
               "summary": "Explore SAE 100R standards (100R1, 100R2, 100R12, 100R13/R15), compare braided vs spiral wire reinforcement, and master the STAMPED sizing methodology.",
@@ -352,6 +753,7 @@ class SyncRepository(private val context: Context) {
               "order": 3,
               "title": "Chapter 3: Fittings, Couplings & Thread Identification",
               "subtitle": "JIC 37°, ORFS, NPT & Crimp Assembly",
+              "category": "Fittings",
               "readingTimeMinutes": 5,
               "thumbnail": "img_hose_fittings",
               "summary": "Identify hydraulic coupling standards: JIC 37° flare, O-Ring Face Seal (ORFS), NPT pipe threads, and permanent crimped ferrule tolerances.",
@@ -369,6 +771,7 @@ class SyncRepository(private val context: Context) {
               "order": 4,
               "title": "Chapter 4: Installation & Routing Best Practices",
               "subtitle": "Bend Radius, Layline Alignment & Clamping",
+              "category": "Installation",
               "readingTimeMinutes": 5,
               "thumbnail": "img_hose_install",
               "summary": "Master correct hose routing techniques: avoiding twists using the printed layline, respecting minimum bend radiuses, and installing proper clamp supports.",
@@ -386,6 +789,7 @@ class SyncRepository(private val context: Context) {
               "order": 5,
               "title": "Chapter 5: Maintenance, Inspection & Safety Protocols",
               "subtitle": "Fluid Injection Hazards, Cardboard Test & Inspections",
+              "category": "Safety",
               "readingTimeMinutes": 6,
               "thumbnail": "img_hose_safety",
               "summary": "Critical safety standards for hydraulic technicians: high-pressure fluid injection injury prevention, the cardboard leak test, and daily inspection checkpoints.",
@@ -403,6 +807,7 @@ class SyncRepository(private val context: Context) {
               "order": 6,
               "title": "Chapter 6: Field Troubleshooting & Pressure Spikes",
               "subtitle": "Diagnosing Water Hammer, Thermal Shock & Blow-offs",
+              "category": "Field Diagnostics",
               "readingTimeMinutes": 6,
               "thumbnail": "img_hose_types",
               "summary": "A cloud-synced diagnostic chapter: how to identify failure patterns such as burst at outer radius, coupling detachment, and inner tube hardening.",
@@ -425,6 +830,7 @@ class SyncRepository(private val context: Context) {
               "order": 7,
               "title": "Chapter 7: Crimper Calibration & Tolerances",
               "subtitle": "Micrometer Verification & Proof Pressure Testing",
+              "category": "Maintenance",
               "readingTimeMinutes": 5,
               "thumbnail": "img_hose_fittings",
               "summary": "Standards for shop crimpers: calibration routines, die wear compensation, and hydrostatic pressure proof testing protocols.",
