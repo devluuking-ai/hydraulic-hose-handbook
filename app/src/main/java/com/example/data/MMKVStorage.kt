@@ -20,6 +20,8 @@ object MMKVStorage {
     private const val KEY_LAST_SYNC_STATUS = "last_sync_status"
     private const val KEY_LAST_SYNC_MESSAGE = "last_sync_message"
     private const val KEY_FONT_SCALE = "font_scale"
+    private const val DEFAULT_FOLDER_ID = "1R-ki1wWO2wiztRVHdiL53vlC8ajind6a"
+    private const val DEFAULT_UPLOAD_ENDPOINT = "https://script.google.com/macros/s/AKfycbygFnoSNYz66jBzubYJGdBdnpWj9c6ydvp2giVtDiuScCv-ryV6JvRt5AG1CYnHKOC4/exec"
 
     // Admin security keys
     private const val KEY_ADMIN_PIN = "admin_pin"
@@ -61,7 +63,7 @@ object MMKVStorage {
     }
 
     // Google Drive settings
-    fun getFolderId(): String = mmkv.decodeString(KEY_FOLDER_ID, "") ?: ""
+    fun getFolderId(): String = mmkv.decodeString(KEY_FOLDER_ID, DEFAULT_FOLDER_ID)?.ifBlank { DEFAULT_FOLDER_ID } ?: DEFAULT_FOLDER_ID
     fun saveFolderId(id: String) {
         mmkv.encode(KEY_FOLDER_ID, id.trim())
     }
@@ -76,7 +78,7 @@ object MMKVStorage {
         mmkv.encode(KEY_DRIVE_OAUTH_TOKEN, token.trim())
     }
 
-    fun getDriveUploadEndpoint(): String = mmkv.decodeString(KEY_DRIVE_UPLOAD_ENDPOINT, "") ?: ""
+    fun getDriveUploadEndpoint(): String = mmkv.decodeString(KEY_DRIVE_UPLOAD_ENDPOINT, DEFAULT_UPLOAD_ENDPOINT)?.ifBlank { DEFAULT_UPLOAD_ENDPOINT } ?: DEFAULT_UPLOAD_ENDPOINT
     fun saveDriveUploadEndpoint(endpoint: String) {
         mmkv.encode(KEY_DRIVE_UPLOAD_ENDPOINT, endpoint.trim())
     }
