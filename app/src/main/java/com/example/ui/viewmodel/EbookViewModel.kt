@@ -1,6 +1,9 @@
 package com.example.ui.viewmodel
 
 import android.app.Application
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.MMKVStorage
@@ -20,6 +23,21 @@ import java.io.File
 
 class EbookViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = SyncRepository(application)
+    private val connectivityManager = getApplication<Application>().getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+    // Live network listener: flush any MMKV-queued Drive uploads as soon as
+    // connectivity returns, without waiting for an app restart or Sync Now.
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            super.onAvailable(network)
+            refreshNetworkState()
+        }
+
+        override fun onLost(network: Network) {
+            super.onLost(network)
+            refreshNetworkState()
+        }
+    }
 
     private val _allChapters = MutableStateFlow<List<Chapter>>(emptyList())
     val allChapters: StateFlow<List<Chapter>> = _allChapters
@@ -119,6 +137,7 @@ class EbookViewModel(application: Application) : AndroidViewModel(application) {
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     init {
+        connectivityManager.registerDefaultNetworkCallback(networkCallback)
         refreshNetworkState()
         loadLocalChapters()
         checkLockoutStatus()
@@ -132,6 +151,15 @@ class EbookViewModel(application: Application) : AndroidViewModel(application) {
             }
             // Auto process pending uploads if any
             processPendingUploads()
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        try {
+            connectivityManager.unregisterNetworkCallback(networkCallback)
+        } catch (e: Exception) {
+            // Best-effort cleanup; the callback may already be gone.
         }
     }
 
