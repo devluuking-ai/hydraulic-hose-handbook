@@ -485,11 +485,25 @@ class SyncRepository(private val context: Context) {
     ): Boolean {
         try {
             if (uploadEndpoint.isNotEmpty()) {
-                // Post to custom webhook or Google Apps Script Web App
-                val requestBody = file.readBytes().toRequestBody("application/octet-stream".toMediaTypeOrNull())
+                // Post BASE64 JSON {folderId, fileName, mimeType, base64} to Apps Script Web App
+                val fileBytes = file.readBytes()
+                val base64Str = android.util.Base64.encodeToString(fileBytes, android.util.Base64.NO_WRAP)
+                val mimeType = when {
+                    file.name.endsWith(".png", ignoreCase = true) -> "image/png"
+                    file.name.endsWith(".webp", ignoreCase = true) -> "image/webp"
+                    else -> "image/jpeg"
+                }
+                val payload = JSONObject().apply {
+                    put("folderId", folderId)
+                    put("fileName", file.name)
+                    put("filename", file.name)
+                    put("mimeType", mimeType)
+                    put("base64", base64Str)
+                }
+                val reqBody = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
                 val req = Request.Builder()
-                    .url("$uploadEndpoint?filename=${file.name}&folderId=$folderId")
-                    .post(requestBody)
+                    .url(uploadEndpoint)
+                    .post(reqBody)
                     .build()
                 val resp = client.newCall(req).execute()
                 return resp.isSuccessful
@@ -536,9 +550,18 @@ class SyncRepository(private val context: Context) {
     ): Boolean {
         try {
             if (uploadEndpoint.isNotEmpty()) {
-                val reqBody = contentJsonString.toRequestBody("application/json".toMediaTypeOrNull())
+                val jsonBytes = contentJsonString.toByteArray(Charsets.UTF_8)
+                val base64Str = android.util.Base64.encodeToString(jsonBytes, android.util.Base64.NO_WRAP)
+                val payload = JSONObject().apply {
+                    put("folderId", folderId)
+                    put("fileName", "content.json")
+                    put("filename", "content.json")
+                    put("mimeType", "application/json")
+                    put("base64", base64Str)
+                }
+                val reqBody = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
                 val req = Request.Builder()
-                    .url("$uploadEndpoint?filename=content.json&folderId=$folderId")
+                    .url(uploadEndpoint)
                     .post(reqBody)
                     .build()
                 val resp = client.newCall(req).execute()
@@ -647,30 +670,114 @@ class SyncRepository(private val context: Context) {
         }
 
         val rawFolderId = MMKVStorage.getFolderId()
-        val apiKey = MMKVStorage.getDriveApiKey()
-        val customUrl = MMKVStorage.getCustomSyncUrl()
-
+        val uploadEndpoint = MMKVStorage.getDriveUploadEndpoint().trim()
+        val customUrl = MMKVStorage.getCustomSyncUrl().trim()
+        val apiKey = MMKVStorage.getDriveApiKey().trim()
         val folderId = extractFolderId(rawFolderId)
 
-        if (folderId.isEmpty() && customUrl.isEmpty()) {
-            return@withContext SyncResult.Failure("No Google Drive Folder ID or Sync URL configured. Please enter Folder ID in Admin Settings.")
-        }
+        val builtInDrawables = setOf(
+            "img_hose_intro", "img_hose_types", "img_hose_fittings",
+            "img_hose_install", "img_hose_safety", "ic_hydraulic_hose"
+        )
 
         try {
-            if (customUrl.isNotEmpty()) {
-                onProgress("Connecting to custom sync URL...")
-                return@withContext syncFromCustomUrl(customUrl, onProgress)
+            // BUG 3: Reader sync needs no API key.
+            // Check Google Drive via Apps Script download action (GET <exec>?action=download&filename=content.json)
+            if (uploadEndpoint.isNotEmpty() || customUrl.isNotEmpty()) {
+                onProgress("Checking Google Drive for handbook updates...")
+                val driveJson = downloadContentJsonFromAppsScript(uploadEndpoint, customUrl, folderId)
+                if (!driveJson.isNullOrBlank()) {
+                    val driveChapters = try {
+                        parseChaptersJson(driveJson, "drive")
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
+
+                    if (driveChapters.isNotEmpty()) {
+                        onProgress("Downloading images for ${driveChapters.size} chapters...")
+
+                        // Collect all image filenames from all chapters (both slots and sections)
+                        val imagesToDownload = mutableSetOf<String>()
+                        for (ch in driveChapters) {
+                            ch.thumbnail?.takeIf { it.isNotBlank() && !it.startsWith("http") && it !in builtInDrawables }?.let { imagesToDownload.add(it) }
+                            ch.secondImage?.takeIf { it.isNotBlank() && !it.startsWith("http") && it !in builtInDrawables }?.let { imagesToDownload.add(it) }
+                            for (sec in ch.sections) {
+                                sec.image?.takeIf { it.isNotBlank() && !it.startsWith("http") && it !in builtInDrawables }?.let { imagesToDownload.add(it) }
+                            }
+                        }
+
+                        var downloadedCount = 0
+                        for (imgName in imagesToDownload) {
+                            val targetFile = File(contentDir, imgName)
+                            if (!targetFile.exists() || !isValidImageFile(targetFile)) {
+                                val ok = downloadFileFromAppsScript(uploadEndpoint, customUrl, folderId, imgName, targetFile)
+                                if (ok) downloadedCount++
+                            }
+                        }
+
+                        // Validate images on chapters: if an image is corrupt or missing, do NOT mark the article as having a valid image
+                        val verifiedChapters = driveChapters.map { ch ->
+                            val validThumb = if (ch.thumbnail in builtInDrawables) {
+                                ch.thumbnail
+                            } else if (!ch.thumbnail.isNullOrBlank()) {
+                                val f = File(contentDir, ch.thumbnail)
+                                if (f.exists() && isValidImageFile(f)) ch.thumbnail else null
+                            } else null
+
+                            val validSecond = if (ch.secondImage in builtInDrawables) {
+                                ch.secondImage
+                            } else if (!ch.secondImage.isNullOrBlank()) {
+                                val f = File(contentDir, ch.secondImage)
+                                if (f.exists() && isValidImageFile(f)) ch.secondImage else null
+                            } else null
+
+                            ch.copy(
+                                thumbnail = validThumb,
+                                secondImage = validSecond
+                            )
+                        }.sortedBy { it.order }
+
+                        // Save updated content.json to local storage
+                        val contentJsonFile = File(contentDir, "content.json")
+                        contentJsonFile.writeText(serializeChaptersToJson(verifiedChapters))
+
+                        val now = System.currentTimeMillis()
+                        MMKVStorage.saveLastSyncTime(now)
+                        val fileList = MMKVStorage.getFileList().toMutableSet()
+                        fileList.add("content.json")
+                        for (ch in verifiedChapters) {
+                            ch.thumbnail?.takeIf { it.isNotBlank() }?.let { fileList.add(it) }
+                            ch.secondImage?.takeIf { it.isNotBlank() }?.let { fileList.add(it) }
+                            for (s in ch.sections) {
+                                s.image?.takeIf { it.isNotBlank() }?.let { fileList.add(it) }
+                            }
+                        }
+                        MMKVStorage.saveFileList(fileList)
+
+                        val msg = "Handbook updated from Google Drive (${verifiedChapters.size} chapters)"
+                        MMKVStorage.saveSyncResult("success", msg)
+                        return@withContext SyncResult.Success(msg, verifiedChapters.size + downloadedCount)
+                    }
+                }
             }
 
+            // Fallback: If an API key is provided, query Drive v3
             if (apiKey.isNotEmpty()) {
-                onProgress("Querying Google Drive API for folder contents...")
+                onProgress("Querying Google Drive API...")
                 return@withContext syncViaDriveApi(folderId, apiKey, onProgress)
-            } else {
-                onProgress("Checking Drive API Key...")
-                return@withContext syncDirectOrPromptApiKey(folderId, onProgress)
             }
+
+            // Fallback: Read local cached chapters (or built-in chapters if no cache)
+            val local = loadChapters()
+            val msg = "Reading saved data (${local.size} chapters)"
+            MMKVStorage.saveSyncResult("success", msg)
+            return@withContext SyncResult.Success(msg, local.size)
         } catch (e: Exception) {
             Log.e("SyncRepository", "Sync failed", e)
+            val local = loadChapters()
+            if (local.isNotEmpty()) {
+                return@withContext SyncResult.Success("Offline - reading saved data (${local.size} chapters)", local.size)
+            }
             val msg = e.localizedMessage ?: "Unknown network error during sync"
             MMKVStorage.saveSyncResult("error", msg)
             SyncResult.Failure(msg)
@@ -741,19 +848,6 @@ class SyncRepository(private val context: Context) {
         MMKVStorage.saveSyncResult("success", "Successfully synced ${downloadedFiles.size} files from Google Drive.")
 
         return SyncResult.Success("Synced ${downloadedFiles.size} files from Google Drive", downloadedFiles.size)
-    }
-
-    /**
-     * FIX (b): Plain explanation when syncing without a Drive API key.
-     * No dead-end, no demo fallback.
-     */
-    private fun syncDirectOrPromptApiKey(
-        folderId: String,
-        onProgress: (String) -> Unit
-    ): SyncResult {
-        val msg = "Google Drive folder sync requires a free Google Drive API Key to query folder contents without user login. Please add an API Key in Admin Settings."
-        MMKVStorage.saveSyncResult("notice", msg)
-        return SyncResult.Failure(msg)
     }
 
     private fun syncFromCustomUrl(
@@ -868,8 +962,30 @@ class SyncRepository(private val context: Context) {
             return@withContext SyncResult.Success(msg, 0)
         }
 
+        // Validate images for missing chapters before merging
+        val verifiedMissing = missing.map { ch ->
+            val validThumb = if (ch.thumbnail in builtInDrawables) {
+                ch.thumbnail
+            } else if (!ch.thumbnail.isNullOrBlank()) {
+                val f = File(contentDir, ch.thumbnail)
+                if (f.exists() && isValidImageFile(f)) ch.thumbnail else null
+            } else null
+
+            val validSecond = if (ch.secondImage in builtInDrawables) {
+                ch.secondImage
+            } else if (!ch.secondImage.isNullOrBlank()) {
+                val f = File(contentDir, ch.secondImage)
+                if (f.exists() && isValidImageFile(f)) ch.secondImage else null
+            } else null
+
+            ch.copy(
+                thumbnail = validThumb,
+                secondImage = validSecond
+            )
+        }
+
         // Merge into local content.json
-        val merged = (local + missing).sortedBy { it.order }
+        val merged = (local + verifiedMissing).sortedBy { it.order }
         val contentJsonFile = File(contentDir, "content.json")
         contentJsonFile.writeText(serializeChaptersToJson(merged))
 
@@ -895,16 +1011,22 @@ class SyncRepository(private val context: Context) {
         return@withContext SyncResult.Success(successMsg, missing.size + downloadedImagesCount)
     }
 
-    private fun isValidImageFile(file: File): Boolean {
-        if (!file.exists() || file.length() < 16) return false
+    fun isRealImageBytes(bytes: ByteArray): Boolean {
+        if (bytes.size < 12) return false
+        val isJpeg = (bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() && bytes[2] == 0xFF.toByte())
+        val isPng = (bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() && bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte())
+        val isWebp = (bytes[0] == 'R'.code.toByte() && bytes[1] == 'I'.code.toByte() && bytes[2] == 'F'.code.toByte() && bytes[3] == 'F'.code.toByte() &&
+                bytes[8] == 'W'.code.toByte() && bytes[9] == 'E'.code.toByte() && bytes[10] == 'B'.code.toByte() && bytes[11] == 'P'.code.toByte())
+        val isGif = (bytes[0] == 'G'.code.toByte() && bytes[1] == 'I'.code.toByte() && bytes[2] == 'F'.code.toByte())
+        return isJpeg || isPng || isWebp || isGif
+    }
+
+    fun isValidImageFile(file: File): Boolean {
+        if (!file.exists() || file.length() < 12) return false
         return try {
-            val header = ByteArray(8)
+            val header = ByteArray(12)
             file.inputStream().use { it.read(header) }
-            val isJpeg = (header[0] == 0xFF.toByte() && header[1] == 0xD8.toByte())
-            val isPng = (header[0] == 0x89.toByte() && header[1] == 0x50.toByte() && header[2] == 0x4E.toByte() && header[3] == 0x47.toByte())
-            val isRiff = (header[0] == 'R'.code.toByte() && header[1] == 'I'.code.toByte() && header[2] == 'F'.code.toByte() && header[3] == 'F'.code.toByte())
-            val isGif = (header[0] == 'G'.code.toByte() && header[1] == 'I'.code.toByte() && header[2] == 'F'.code.toByte())
-            isJpeg || isPng || isRiff || isGif
+            isRealImageBytes(header)
         } catch (_: Exception) {
             false
         }
@@ -960,53 +1082,65 @@ class SyncRepository(private val context: Context) {
         filename: String,
         targetFile: File
     ): Boolean {
-        if (uploadEndpoint.isNotEmpty()) {
-            val sep = if (uploadEndpoint.contains("?")) "&" else "?"
+        val endpoint = uploadEndpoint.ifBlank { customUrl }
+        if (endpoint.isNotEmpty()) {
+            val sep = if (endpoint.contains("?")) "&" else "?"
             val folderParam = if (folderId.isNotEmpty()) "&folderId=$folderId" else ""
             val encFilename = try {
                 java.net.URLEncoder.encode(filename, "UTF-8")
             } catch (_: Exception) {
                 filename
             }
-            val url = "$uploadEndpoint${sep}action=download&filename=$encFilename$folderParam"
+            val url = "$endpoint${sep}action=download&filename=$encFilename$folderParam"
             try {
                 val req = Request.Builder().url(url).build()
                 val resp = client.newCall(req).execute()
                 if (resp.isSuccessful) {
-                    val bytes = resp.body?.bytes()
-                    if (bytes != null && bytes.size >= 16) {
-                        // Avoid writing HTML error pages as image files
-                        if (bytes[0] == '<'.code.toByte()) {
+                    val rawBytes = resp.body?.bytes()
+                    if (rawBytes != null && rawBytes.size >= 12) {
+                        // 1. Skip HTML error or login pages
+                        if (rawBytes[0] == '<'.code.toByte()) {
                             Log.w("SyncRepository", "Apps Script download returned HTML page instead of image for $filename")
+                            if (targetFile.exists()) targetFile.delete()
                             return false
                         }
 
-                        // Check if returned JSON containing base64 data
-                        if (bytes[0] == '{'.code.toByte()) {
+                        // 2. Only base64-decode if the response body is actually a JSON/base64 wrapper
+                        val imageBytes: ByteArray = if (rawBytes[0] == '{'.code.toByte()) {
                             try {
-                                val jsonStr = String(bytes, Charsets.UTF_8)
+                                val jsonStr = String(rawBytes, Charsets.UTF_8)
                                 val obj = JSONObject(jsonStr)
                                 val base64Str = obj.optString("base64").ifBlank { obj.optString("data") }
                                 if (base64Str.isNotBlank()) {
-                                    val decoded = android.util.Base64.decode(base64Str, android.util.Base64.DEFAULT)
-                                    targetFile.writeBytes(decoded)
-                                    MMKVStorage.addToFileList(filename)
-                                    return true
-                                } else if (obj.optString("status") == "error" || obj.has("error")) {
-                                    Log.w("SyncRepository", "Apps Script reported error for $filename: ${obj.optString("message")}")
+                                    android.util.Base64.decode(base64Str, android.util.Base64.DEFAULT)
+                                } else {
+                                    Log.w("SyncRepository", "Apps Script reported error for $filename: ${obj.optString("message", "File not found")}")
+                                    if (targetFile.exists()) targetFile.delete()
                                     return false
                                 }
-                            } catch (_: Exception) {}
+                            } catch (_: Exception) {
+                                rawBytes
+                            }
+                        } else {
+                            // Raw blob bytes AS-IS
+                            rawBytes
                         }
 
-                        // Raw binary image data
-                        targetFile.writeBytes(bytes)
+                        // 3. Validate image magic bytes (JPEG FF D8 FF / PNG / WEBP)
+                        if (!isRealImageBytes(imageBytes)) {
+                            Log.w("SyncRepository", "Corrupt or non-image data received for $filename, skipping file")
+                            if (targetFile.exists()) targetFile.delete()
+                            return false
+                        }
+
+                        // 4. Save bytes unchanged to filesDir/hydraulic_content under exact filename
+                        targetFile.writeBytes(imageBytes)
                         MMKVStorage.addToFileList(filename)
                         return true
                     }
                 }
             } catch (e: Exception) {
-                Log.w("SyncRepository", "Failed downloading image $filename from Apps Script: ${e.message}")
+                Log.w("SyncRepository", "Failed downloading image $filename: ${e.message}")
             }
         }
         return false

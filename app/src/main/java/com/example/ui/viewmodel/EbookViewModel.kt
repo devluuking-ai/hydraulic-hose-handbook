@@ -25,12 +25,18 @@ class EbookViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = SyncRepository(application)
     private val connectivityManager = getApplication<Application>().getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
-    // Live network listener: flush any MMKV-queued Drive uploads as soon as
-    // connectivity returns, without waiting for an app restart or Sync Now.
+    // Live network listener: flush any MMKV-queued Drive uploads and pull
+    // new Drive content/images as soon as connectivity returns.
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             super.onAvailable(network)
             refreshNetworkState()
+            if (!_isOffline.value && !_isSyncing.value) {
+                val hasConfig = MMKVStorage.getFolderId().isNotEmpty() || MMKVStorage.getCustomSyncUrl().isNotEmpty()
+                if (hasConfig) {
+                    syncNow(isAutoSync = true)
+                }
+            }
         }
 
         override fun onLost(network: Network) {
@@ -423,37 +429,40 @@ class EbookViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun syncNow(isAutoSync: Boolean = false) {
+        if (_isSyncing.value) return
         refreshNetworkState()
         if (_isOffline.value) {
             _syncStatusMessage.value = "Device is offline. Reading saved data."
             return
         }
 
+        _isSyncing.value = true
+        _syncProgressText.value = if (isAutoSync) "Auto-checking Google Drive updates..." else "Initiating Drive sync..."
+
         viewModelScope.launch {
-            _isSyncing.value = true
-            _syncProgressText.value = if (isAutoSync) "Auto-checking Google Drive updates..." else "Initiating Drive sync..."
+            try {
+                val result = repository.syncFromDrive { progressMsg ->
+                    _syncProgressText.value = progressMsg
+                }
 
-            val result = repository.syncFromDrive { progressMsg ->
-                _syncProgressText.value = progressMsg
+                when (result) {
+                    is SyncResult.Success -> {
+                        _syncStatusMessage.value = result.message
+                        _lastSyncTime.value = MMKVStorage.getLastSyncTime()
+                        _syncedFiles.value = MMKVStorage.getFileList()
+                        loadLocalChapters()
+                    }
+                    is SyncResult.Failure -> {
+                        _syncStatusMessage.value = result.error
+                    }
+                    is SyncResult.Offline -> {
+                        _syncStatusMessage.value = "Device is offline. Reading saved data."
+                    }
+                }
+            } finally {
+                _isSyncing.value = false
+                _syncProgressText.value = ""
             }
-
-            when (result) {
-                is SyncResult.Success -> {
-                    _syncStatusMessage.value = result.message
-                    _lastSyncTime.value = MMKVStorage.getLastSyncTime()
-                    _syncedFiles.value = MMKVStorage.getFileList()
-                    loadLocalChapters()
-                }
-                is SyncResult.Failure -> {
-                    _syncStatusMessage.value = result.error
-                }
-                is SyncResult.Offline -> {
-                    _syncStatusMessage.value = "Device is offline. Reading saved data."
-                }
-            }
-
-            _isSyncing.value = false
-            _syncProgressText.value = ""
         }
     }
 
