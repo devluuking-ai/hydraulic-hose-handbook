@@ -133,9 +133,13 @@ class EbookViewModel(application: Application) : AndroidViewModel(application) {
                         ch.subtitle.lowercase().contains(q) ||
                         ch.category.lowercase().contains(q) ||
                         ch.summary.lowercase().contains(q) ||
+                        ch.thumbnail?.lowercase()?.contains(q) == true ||
+                        ch.secondImage?.lowercase()?.contains(q) == true ||
                         ch.sections.any { sec ->
                             sec.heading.lowercase().contains(q) ||
                                     sec.text.lowercase().contains(q) ||
+                                    sec.image?.lowercase()?.contains(q) == true ||
+                                    sec.caption?.lowercase()?.contains(q) == true ||
                                     sec.calloutTitle?.lowercase()?.contains(q) == true ||
                                     sec.calloutText?.lowercase()?.contains(q) == true
                         }
@@ -346,11 +350,13 @@ class EbookViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    // Admin Add / Edit Article
+    // Admin Add / Edit Article (Supports up to 2 images)
     fun saveArticle(
         article: Chapter,
-        imageBytes: ByteArray?,
-        imageExtension: String = "jpg",
+        imageBytes1: ByteArray?,
+        imageExtension1: String = "jpg",
+        imageBytes2: ByteArray? = null,
+        imageExtension2: String = "jpg",
         onComplete: (String) -> Unit
     ) {
         onAdminInteraction()
@@ -358,13 +364,28 @@ class EbookViewModel(application: Application) : AndroidViewModel(application) {
             _isSyncing.value = true
             _syncProgressText.value = "Saving article & checking Drive sync..."
 
-            val (_, statusMsg) = repository.saveOrUpdateArticle(article, imageBytes, imageExtension)
+            val (_, statusMsg) = repository.saveOrUpdateArticle(
+                article = article,
+                imageBytes1 = imageBytes1,
+                imageExtension1 = imageExtension1,
+                imageBytes2 = imageBytes2,
+                imageExtension2 = imageExtension2
+            )
 
             loadLocalChapters()
             _isSyncing.value = false
             _syncProgressText.value = ""
             onComplete(statusMsg)
         }
+    }
+
+    fun saveArticle(
+        article: Chapter,
+        imageBytes: ByteArray?,
+        imageExtension: String = "jpg",
+        onComplete: (String) -> Unit
+    ) {
+        saveArticle(article, imageBytes, imageExtension, null, "jpg", onComplete)
     }
 
     // Admin Delete Article

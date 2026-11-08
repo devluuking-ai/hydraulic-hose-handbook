@@ -169,6 +169,7 @@ object MMKVStorage {
                         articleId = obj.getString("articleId"),
                         title = obj.getString("title"),
                         localImageName = obj.optString("localImageName").takeIf { it.isNotBlank() },
+                        localSecondImageName = obj.optString("localSecondImageName").takeIf { it.isNotBlank() },
                         timestamp = obj.optLong("timestamp", System.currentTimeMillis())
                     )
                 )
@@ -185,7 +186,8 @@ object MMKVStorage {
             obj.put("action", item.action)
             obj.put("articleId", item.articleId)
             obj.put("title", item.title)
-            obj.put("localImageName", item.localImageName)
+            obj.put("localImageName", item.localImageName ?: "")
+            obj.put("localSecondImageName", item.localSecondImageName ?: "")
             obj.put("timestamp", item.timestamp)
             array.put(obj)
         }

@@ -25,6 +25,7 @@ data class Chapter(
     val order: Int = 1,
     val readingTimeMinutes: Int = 5,
     val thumbnail: String? = null,
+    val secondImage: String? = null,
     val summary: String = "",
     val sections: List<ChapterSection> = emptyList(),
     val isBookmarked: Boolean = false,
@@ -38,5 +39,6 @@ data class PendingUpload(
     val articleId: String,
     val title: String,
     val localImageName: String? = null,
+    val localSecondImageName: String? = null,
     val timestamp: Long = System.currentTimeMillis()
 )

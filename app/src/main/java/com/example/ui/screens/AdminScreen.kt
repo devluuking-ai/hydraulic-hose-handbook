@@ -149,8 +149,11 @@ fun AdminScreen(
     var formSubtitle by rememberSaveable { mutableStateOf("") }
     var formReadingTime by rememberSaveable { mutableStateOf("5") }
     var formTextContent by rememberSaveable { mutableStateOf("") }
-    var selectedImageUri by rememberSaveable { mutableStateOf<Uri?>(null) }
-    var existingThumbnailName by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedImageUri1 by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var existingThumbnail1 by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedImageUri2 by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var existingThumbnail2 by rememberSaveable { mutableStateOf<String?>(null) }
+    var activePickerSlot by rememberSaveable { mutableIntStateOf(1) }
 
     // Deletion dialog state
     var chapterToDelete by remember { mutableStateOf<Chapter?>(null) }
@@ -162,7 +165,11 @@ fun AdminScreen(
         viewModel.setPickingPhoto(false)
         viewModel.onAdminInteraction()
         if (uri != null) {
-            selectedImageUri = uri
+            if (activePickerSlot == 1) {
+                selectedImageUri1 = uri
+            } else {
+                selectedImageUri2 = uri
+            }
         }
     }
 
@@ -173,8 +180,10 @@ fun AdminScreen(
         formSubtitle = ""
         formReadingTime = "5"
         formTextContent = ""
-        selectedImageUri = null
-        existingThumbnailName = null
+        selectedImageUri1 = null
+        existingThumbnail1 = null
+        selectedImageUri2 = null
+        existingThumbnail2 = null
         selectedAdminTab = 1
     }
 
@@ -191,8 +200,10 @@ fun AdminScreen(
                 sec.text
             }
         }.ifBlank { chapter.summary }
-        selectedImageUri = null
-        existingThumbnailName = chapter.thumbnail
+        selectedImageUri1 = null
+        existingThumbnail1 = chapter.thumbnail
+        selectedImageUri2 = null
+        existingThumbnail2 = chapter.secondImage
         selectedAdminTab = 1
     }
 
@@ -369,18 +380,33 @@ fun AdminScreen(
                         onReadingTimeChange = { formReadingTime = it; viewModel.onAdminInteraction() },
                         textContent = formTextContent,
                         onTextContentChange = { formTextContent = it; viewModel.onAdminInteraction() },
-                        selectedImageUri = selectedImageUri,
-                        existingThumbnail = existingThumbnailName,
-                        onPickImageClick = {
+                        selectedImageUri1 = selectedImageUri1,
+                        existingThumbnail1 = existingThumbnail1,
+                        onPickImage1Click = {
+                            activePickerSlot = 1
                             viewModel.setPickingPhoto(true)
                             photoPickerLauncher.launch(
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                             )
                         },
-                        onRemoveImageClick = {
+                        onRemoveImage1Click = {
                             viewModel.onAdminInteraction()
-                            selectedImageUri = null
-                            existingThumbnailName = null
+                            selectedImageUri1 = null
+                            existingThumbnail1 = null
+                        },
+                        selectedImageUri2 = selectedImageUri2,
+                        existingThumbnail2 = existingThumbnail2,
+                        onPickImage2Click = {
+                            activePickerSlot = 2
+                            viewModel.setPickingPhoto(true)
+                            photoPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        },
+                        onRemoveImage2Click = {
+                            viewModel.onAdminInteraction()
+                            selectedImageUri2 = null
+                            existingThumbnail2 = null
                         },
                         isSaving = isSyncing,
                         onSaveClick = {
@@ -391,13 +417,26 @@ fun AdminScreen(
                                 return@AdminArticleForm
                             }
 
-                            // Read image bytes if picked from gallery
-                            var imageBytes: ByteArray? = null
-                            var imageExt = "jpg"
-                            if (selectedImageUri != null) {
+                            // Read image 1 bytes if picked
+                            var imageBytes1: ByteArray? = null
+                            var imageExt1 = "jpg"
+                            if (selectedImageUri1 != null) {
                                 try {
-                                    val stream: InputStream? = context.contentResolver.openInputStream(selectedImageUri!!)
-                                    imageBytes = stream?.readBytes()
+                                    val stream: InputStream? = context.contentResolver.openInputStream(selectedImageUri1!!)
+                                    imageBytes1 = stream?.readBytes()
+                                    stream?.close()
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
+                            }
+
+                            // Read image 2 bytes if picked
+                            var imageBytes2: ByteArray? = null
+                            var imageExt2 = "jpg"
+                            if (selectedImageUri2 != null) {
+                                try {
+                                    val stream: InputStream? = context.contentResolver.openInputStream(selectedImageUri2!!)
+                                    imageBytes2 = stream?.readBytes()
                                     stream?.close()
                                 } catch (e: Exception) {
                                     e.printStackTrace()
@@ -411,7 +450,7 @@ fun AdminScreen(
                                 ChapterSection(
                                     heading = trimmedTitle,
                                     text = formTextContent.trim(),
-                                    image = existingThumbnailName
+                                    image = existingThumbnail1
                                 )
                             )
 
@@ -422,15 +461,18 @@ fun AdminScreen(
                                 category = formCategory.trim(),
                                 readingTimeMinutes = readTime,
                                 summary = formSubtitle.ifBlank { formTextContent.take(120) },
-                                thumbnail = existingThumbnailName,
+                                thumbnail = existingThumbnail1,
+                                secondImage = existingThumbnail2,
                                 sections = sections,
                                 source = "admin"
                             )
 
                             viewModel.saveArticle(
                                 article = articleToSave,
-                                imageBytes = imageBytes,
-                                imageExtension = imageExt
+                                imageBytes1 = imageBytes1,
+                                imageExtension1 = imageExt1,
+                                imageBytes2 = imageBytes2,
+                                imageExtension2 = imageExt2
                             ) { resultMsg ->
                                 scope.launch {
                                     snackbarHostState.showSnackbar(resultMsg)
@@ -588,19 +630,38 @@ fun AdminArticlesList(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Surface(
-                                    color = Color(0xFFEFF6FF),
-                                    shape = RoundedCornerShape(4.dp)
-                                ) {
-                                    Text(
-                                        text = "${chapter.category} • #${chapter.order}",
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            color = AccentBlue,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 11.sp
-                                        ),
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Surface(
+                                        color = Color(0xFFEFF6FF),
+                                        shape = RoundedCornerShape(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "${chapter.category} • #${chapter.order}",
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                color = AccentBlue,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 11.sp
+                                            ),
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                    if (!chapter.secondImage.isNullOrBlank()) {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Surface(
+                                            color = Color(0xFFF1F5F9),
+                                            shape = RoundedCornerShape(4.dp)
+                                        ) {
+                                            Text(
+                                                text = "2 imgs",
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    color = NavyPrimary,
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 10.sp
+                                                ),
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
                                 }
 
                                 // Status Badge
@@ -723,10 +784,14 @@ fun AdminArticleForm(
     onReadingTimeChange: (String) -> Unit,
     textContent: String,
     onTextContentChange: (String) -> Unit,
-    selectedImageUri: Uri?,
-    existingThumbnail: String?,
-    onPickImageClick: () -> Unit,
-    onRemoveImageClick: () -> Unit,
+    selectedImageUri1: Uri?,
+    existingThumbnail1: String?,
+    onPickImage1Click: () -> Unit,
+    onRemoveImage1Click: () -> Unit,
+    selectedImageUri2: Uri?,
+    existingThumbnail2: String?,
+    onPickImage2Click: () -> Unit,
+    onRemoveImage2Click: () -> Unit,
     isSaving: Boolean,
     onSaveClick: () -> Unit,
     onCancelClick: () -> Unit,
@@ -836,9 +901,9 @@ fun AdminArticleForm(
             )
         }
 
-        // Image Section (Photo Picker)
+        // Image Section: Slot 1 (Primary / Thumbnail)
         item {
-            Text(text = "Article Image", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            Text(text = "Image 1 (Primary Thumbnail & Diagram)", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
             Spacer(modifier = Modifier.height(6.dp))
 
             Card(
@@ -852,10 +917,10 @@ fun AdminArticleForm(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     when {
-                        selectedImageUri != null -> {
+                        selectedImageUri1 != null -> {
                             AsyncImage(
-                                model = selectedImageUri,
-                                contentDescription = "Selected Gallery Image",
+                                model = selectedImageUri1,
+                                contentDescription = "Selected Gallery Image 1",
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -863,10 +928,10 @@ fun AdminArticleForm(
                                     .clip(RoundedCornerShape(8.dp))
                             )
                         }
-                        !existingThumbnail.isNullOrBlank() -> {
+                        !existingThumbnail1.isNullOrBlank() -> {
                             ChapterThumbnail(
-                                imageName = existingThumbnail,
-                                contentDescription = "Current Image",
+                                imageName = existingThumbnail1,
+                                contentDescription = "Current Image 1",
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .aspectRatio(16f / 9f)
@@ -877,7 +942,7 @@ fun AdminArticleForm(
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(120.dp)
+                                    .height(110.dp)
                                     .background(Color(0xFFF1F5F9), RoundedCornerShape(8.dp)),
                                 contentAlignment = Alignment.Center
                             ) {
@@ -886,10 +951,10 @@ fun AdminArticleForm(
                                         imageVector = Icons.Default.Image,
                                         contentDescription = null,
                                         tint = Color(0xFF94A3B8),
-                                        modifier = Modifier.size(36.dp)
+                                        modifier = Modifier.size(32.dp)
                                     )
                                     Spacer(modifier = Modifier.height(4.dp))
-                                    Text("No image selected", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                                    Text("No primary image selected", color = Color(0xFF94A3B8), fontSize = 12.sp)
                                 }
                             }
                         }
@@ -902,7 +967,7 @@ fun AdminArticleForm(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         OutlinedButton(
-                            onClick = onPickImageClick,
+                            onClick = onPickImage1Click,
                             shape = RoundedCornerShape(8.dp),
                             modifier = Modifier.testTag("form_pick_image_btn")
                         ) {
@@ -912,14 +977,107 @@ fun AdminArticleForm(
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text(if (selectedImageUri != null || existingThumbnail != null) "Change Image" else "Add Image")
+                            Text(if (selectedImageUri1 != null || existingThumbnail1 != null) "Change Image 1" else "Add Image 1")
                         }
 
-                        if (selectedImageUri != null || existingThumbnail != null) {
+                        if (selectedImageUri1 != null || existingThumbnail1 != null) {
                             TextButton(
-                                onClick = onRemoveImageClick,
+                                onClick = onRemoveImage1Click,
                                 colors = ButtonDefaults.textButtonColors(contentColor = WarningRed),
                                 modifier = Modifier.testTag("form_remove_image_btn")
+                            ) {
+                                Text("Remove")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Image Section: Slot 2 (Secondary Diagram / Cutaway)
+        item {
+            Text(text = "Image 2 (Secondary Reference Diagram)", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceWhite),
+                border = androidx.compose.foundation.BorderStroke(1.dp, OutlineBorder)
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    when {
+                        selectedImageUri2 != null -> {
+                            AsyncImage(
+                                model = selectedImageUri2,
+                                contentDescription = "Selected Gallery Image 2",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(16f / 9f)
+                                    .clip(RoundedCornerShape(8.dp))
+                            )
+                        }
+                        !existingThumbnail2.isNullOrBlank() -> {
+                            ChapterThumbnail(
+                                imageName = existingThumbnail2,
+                                contentDescription = "Current Image 2",
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(16f / 9f)
+                                    .clip(RoundedCornerShape(8.dp))
+                            )
+                        }
+                        else -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(110.dp)
+                                    .background(Color(0xFFF1F5F9), RoundedCornerShape(8.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Icon(
+                                        imageVector = Icons.Default.Image,
+                                        contentDescription = null,
+                                        tint = Color(0xFF94A3B8),
+                                        modifier = Modifier.size(32.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text("No secondary image (optional)", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        OutlinedButton(
+                            onClick = onPickImage2Click,
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.testTag("form_pick_image_2_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AddPhotoAlternate,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(if (selectedImageUri2 != null || existingThumbnail2 != null) "Change Image 2" else "Add Image 2")
+                        }
+
+                        if (selectedImageUri2 != null || existingThumbnail2 != null) {
+                            TextButton(
+                                onClick = onRemoveImage2Click,
+                                colors = ButtonDefaults.textButtonColors(contentColor = WarningRed),
+                                modifier = Modifier.testTag("form_remove_image_2_btn")
                             ) {
                                 Text("Remove")
                             }

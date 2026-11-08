@@ -114,10 +114,30 @@ class ExampleUnitTest {
             action = "UPSERT",
             articleId = "art-456",
             title = "Test Article",
-            localImageName = "art_test.jpg"
+            localImageName = "art_test_1.jpg",
+            localSecondImageName = "art_test_2.jpg"
         )
         assertEquals("UPSERT", upload.action)
         assertEquals("art-456", upload.articleId)
-        assertEquals("art_test.jpg", upload.localImageName)
+        assertEquals("art_test_1.jpg", upload.localImageName)
+        assertEquals("art_test_2.jpg", upload.localSecondImageName)
+    }
+
+    @Test
+    fun chapter_twoImagesSupport() {
+        // 0 images
+        val ch0 = Chapter(id = "c0", title = "No Images")
+        assertEquals(null, ch0.thumbnail)
+        assertEquals(null, ch0.secondImage)
+
+        // 1 image
+        val ch1 = Chapter(id = "c1", title = "One Image", thumbnail = "img1.jpg")
+        assertEquals("img1.jpg", ch1.thumbnail)
+        assertEquals(null, ch1.secondImage)
+
+        // 2 images
+        val ch2 = Chapter(id = "c2", title = "Two Images", thumbnail = "img1.jpg", secondImage = "img2.jpg")
+        assertEquals("img1.jpg", ch2.thumbnail)
+        assertEquals("img2.jpg", ch2.secondImage)
     }
 }

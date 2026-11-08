@@ -29,8 +29,10 @@ sealed class SyncResult {
 
 class SyncRepository(private val context: Context) {
     private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
         .build()
 
     private val contentDir: File
@@ -74,10 +76,10 @@ class SyncRepository(private val context: Context) {
     }
 
     /**
-     * FIX (b): One-time MMKV migration (flag demo_cleanup_done) that runs on first launch
+     * One-time MMKV migration (flag demo_cleanup_done) that runs on first launch
      * of the new APK: drops demo chapters 6-7 (chapter_6_troubleshooting, chapter_7_crimper)
-     * and restores chapters 1-5 from DefaultChapters, while KEEPING any admin-added articles
-     * (source 'admin' or id starting with custom_).
+     * and any placeholder/sample articles, restores chapters 1-5 from DefaultChapters,
+     * while KEEPING any admin-added articles (source 'admin' or id starting with custom_).
      */
     private fun migrateDemoContentIfNeeded() {
         if (MMKVStorage.getBoolean("demo_cleanup_done", false)) return
@@ -96,10 +98,12 @@ class SyncRepository(private val context: Context) {
             emptyList()
         }
 
-        // Keep admin created articles, drop demo chapters (chapter_6_troubleshooting, chapter_7_crimper)
+        // Keep real admin created articles, drop demo/sample chapters
         val adminArticles = currentList.filter { ch ->
             (ch.source == "admin" || ch.id.startsWith("custom_")) &&
                     ch.id != "chapter_6_troubleshooting" && ch.id != "chapter_7_crimper" &&
+                    !ch.id.startsWith("sample_") && !ch.id.startsWith("demo_") &&
+                    !ch.title.contains("[Sample]") && !ch.title.contains("[Demo]") &&
                     ch.id !in builtInIds
         }
 
@@ -132,8 +136,10 @@ class SyncRepository(private val context: Context) {
             val item = jsonArray.getJSONObject(i)
             val id = item.optString("id", "chapter_$i")
 
-            // Skip removed demo chapters 6 and 7 if present in Drive content.json
-            if (id == "chapter_6_troubleshooting" || id == "chapter_7_crimper") {
+            // Skip removed demo/sample chapters 6, 7 or sample markers
+            if (id == "chapter_6_troubleshooting" || id == "chapter_7_crimper" ||
+                id.startsWith("sample_") || id.startsWith("demo_")
+            ) {
                 continue
             }
 
@@ -143,6 +149,7 @@ class SyncRepository(private val context: Context) {
             val order = item.optInt("order", i + 1)
             val readingTime = item.optInt("readingTimeMinutes", 5)
             val thumbnail = item.optString("thumbnail").ifBlank { item.optString("image") }.takeIf { it.isNotBlank() }
+            val secondImage = item.optString("secondImage").takeIf { it.isNotBlank() }
             val summary = item.optString("summary", "")
             val source = item.optString("source", defaultSource)
             val uploadStatus = item.optString("uploadStatus", "SAVED_TO_DRIVE")
@@ -191,6 +198,7 @@ class SyncRepository(private val context: Context) {
                     order = order,
                     readingTimeMinutes = readingTime,
                     thumbnail = thumbnail,
+                    secondImage = secondImage,
                     summary = summary,
                     sections = sections,
                     source = source,
@@ -216,6 +224,7 @@ class SyncRepository(private val context: Context) {
             obj.put("order", ch.order)
             obj.put("readingTimeMinutes", ch.readingTimeMinutes)
             obj.put("thumbnail", ch.thumbnail ?: "")
+            obj.put("secondImage", ch.secondImage ?: "")
             obj.put("summary", ch.summary)
             obj.put("source", ch.source)
             obj.put("uploadStatus", ch.uploadStatus)
@@ -241,26 +250,41 @@ class SyncRepository(private val context: Context) {
 
     /**
      * Admin: Save or update an article from inside APK.
-     * Writes image & content.json to internal filesDir, updates MMKV,
+     * Writes images & content.json to internal filesDir, updates MMKV,
      * attempts Drive upload, or queues for offline upload.
+     * Supports 0, 1, or 2 images per article.
      */
     suspend fun saveOrUpdateArticle(
         article: Chapter,
-        imageBytes: ByteArray?,
-        imageExtension: String = "jpg"
+        imageBytes1: ByteArray?,
+        imageExtension1: String = "jpg",
+        imageBytes2: ByteArray? = null,
+        imageExtension2: String = "jpg"
     ): Pair<Chapter, String> = withContext(Dispatchers.IO) {
-        // 1. If new image bytes were provided, save to filesDir/hydraulic_content/
+        val now = System.currentTimeMillis()
+        val safeTitle = article.title.lowercase().replace("[^a-z0-9]".toRegex(), "_").take(15)
+
+        // 1. Process slot 1 image
         var updatedThumbnail = article.thumbnail
-        if (imageBytes != null && imageBytes.isNotEmpty()) {
-            val safeTitle = article.title.lowercase().replace("[^a-z0-9]".toRegex(), "_").take(15)
-            val imgFileName = "art_${safeTitle}_${System.currentTimeMillis()}.$imageExtension"
-            val imgFile = File(contentDir, imgFileName)
-            imgFile.writeBytes(imageBytes)
-            updatedThumbnail = imgFileName
-            MMKVStorage.addToFileList(imgFileName)
+        if (imageBytes1 != null && imageBytes1.isNotEmpty()) {
+            val imgFileName1 = "art_${safeTitle}_1_${now}.$imageExtension1"
+            val imgFile1 = File(contentDir, imgFileName1)
+            imgFile1.writeBytes(imageBytes1)
+            updatedThumbnail = imgFileName1
+            MMKVStorage.addToFileList(imgFileName1)
         }
 
-        // 2. Load existing chapters, replace or add
+        // 2. Process slot 2 image
+        var updatedSecondImage = article.secondImage
+        if (imageBytes2 != null && imageBytes2.isNotEmpty()) {
+            val imgFileName2 = "art_${safeTitle}_2_${now}.$imageExtension2"
+            val imgFile2 = File(contentDir, imgFileName2)
+            imgFile2.writeBytes(imageBytes2)
+            updatedSecondImage = imgFileName2
+            MMKVStorage.addToFileList(imgFileName2)
+        }
+
+        // 3. Load existing chapters, replace or add
         val currentChapters = loadChapters().toMutableList()
         val existingIndex = currentChapters.indexOfFirst { it.id == article.id }
 
@@ -272,6 +296,7 @@ class SyncRepository(private val context: Context) {
 
         val articleToSave = article.copy(
             thumbnail = updatedThumbnail,
+            secondImage = updatedSecondImage,
             order = determinedOrder,
             source = if (article.source == "builtin") "admin" else article.source
         )
@@ -282,22 +307,22 @@ class SyncRepository(private val context: Context) {
             currentChapters.add(articleToSave)
         }
 
-        // 3. Save updated content.json to filesDir
+        // 4. Save updated content.json to filesDir
         val contentJsonFile = File(contentDir, "content.json")
         val jsonString = serializeChaptersToJson(currentChapters)
         contentJsonFile.writeText(jsonString)
 
-        // 4. Update MMKV
-        val now = System.currentTimeMillis()
+        // 5. Update MMKV
         MMKVStorage.addToFileList("content.json")
         MMKVStorage.saveLastSyncTime(now)
         val syncIndex = JSONObject(MMKVStorage.getSyncIndex()).apply {
             put("content.json", now.toString())
             if (updatedThumbnail != null) put(updatedThumbnail, now.toString())
+            if (updatedSecondImage != null) put(updatedSecondImage, now.toString())
         }
         MMKVStorage.saveSyncIndex(syncIndex.toString())
 
-        // 5. Check Drive upload readiness
+        // 6. Check Drive upload readiness
         val isNetAvailable = isOnline()
         val folderId = extractFolderId(MMKVStorage.getFolderId())
         val oauthToken = MMKVStorage.getDriveOAuthToken()
@@ -315,12 +340,21 @@ class SyncRepository(private val context: Context) {
                     action = "UPSERT",
                     articleId = articleToSave.id,
                     title = articleToSave.title,
-                    localImageName = updatedThumbnail
+                    localImageName = updatedThumbnail,
+                    localSecondImageName = updatedSecondImage
                 )
             )
         } else if (folderId.isNotEmpty() && (oauthToken.isNotEmpty() || uploadEndpoint.isNotEmpty())) {
             // Attempt upload to Google Drive
-            val uploadSuccess = uploadToDrive(articleToSave, updatedThumbnail, jsonString, folderId, oauthToken, uploadEndpoint)
+            val uploadSuccess = uploadToDrive(
+                article = articleToSave,
+                imageFileName1 = updatedThumbnail,
+                imageFileName2 = updatedSecondImage,
+                contentJsonString = jsonString,
+                folderId = folderId,
+                oauthToken = oauthToken,
+                uploadEndpoint = uploadEndpoint
+            )
             if (uploadSuccess) {
                 finalUploadStatus = "SAVED_TO_DRIVE"
                 statusMessage = "Saved to Drive"
@@ -333,7 +367,8 @@ class SyncRepository(private val context: Context) {
                         action = "UPSERT",
                         articleId = articleToSave.id,
                         title = articleToSave.title,
-                        localImageName = updatedThumbnail
+                        localImageName = updatedThumbnail,
+                        localSecondImageName = updatedSecondImage
                     )
                 )
             }
@@ -347,7 +382,8 @@ class SyncRepository(private val context: Context) {
                     action = "UPSERT",
                     articleId = articleToSave.id,
                     title = articleToSave.title,
-                    localImageName = updatedThumbnail
+                    localImageName = updatedThumbnail,
+                    localSecondImageName = updatedSecondImage
                 )
             )
         }
@@ -360,8 +396,14 @@ class SyncRepository(private val context: Context) {
         return@withContext Pair(finalArticle, statusMessage)
     }
 
+    suspend fun saveOrUpdateArticle(
+        article: Chapter,
+        imageBytes: ByteArray?,
+        imageExtension: String = "jpg"
+    ): Pair<Chapter, String> = saveOrUpdateArticle(article, imageBytes, imageExtension, null, "jpg")
+
     /**
-     * FIX (c): Delete an article locally ONLY.
+     * Delete an article locally ONLY.
      * Removes from local content.json and filesDir cache.
      * Does NOT delete it from Google Drive permanently (leaves Drive copy content.json and images untouched).
      * No Drive upload of post-delete content.json and no DELETE pending-upload queueing.
@@ -370,12 +412,19 @@ class SyncRepository(private val context: Context) {
         val currentChapters = loadChapters().toMutableList()
         val target = currentChapters.find { it.id == articleId } ?: return@withContext Pair(false, "Article not found")
 
-        // If local custom image exists, remove it locally
+        // If local custom images exist, remove locally
         if (!target.thumbnail.isNullOrBlank()) {
             val imgFile = File(contentDir, target.thumbnail)
             if (imgFile.exists()) {
                 imgFile.delete()
                 MMKVStorage.removeFromFileList(target.thumbnail)
+            }
+        }
+        if (!target.secondImage.isNullOrBlank()) {
+            val imgFile2 = File(contentDir, target.secondImage)
+            if (imgFile2.exists()) {
+                imgFile2.delete()
+                MMKVStorage.removeFromFileList(target.secondImage)
             }
         }
 
@@ -397,18 +446,26 @@ class SyncRepository(private val context: Context) {
      */
     private fun uploadToDrive(
         article: Chapter,
-        imageFileName: String?,
+        imageFileName1: String?,
+        imageFileName2: String?,
         contentJsonString: String,
         folderId: String,
         oauthToken: String,
         uploadEndpoint: String
     ): Boolean {
         try {
-            // Upload image first if present
-            if (!imageFileName.isNullOrBlank()) {
-                val imgFile = File(contentDir, imageFileName)
-                if (imgFile.exists()) {
-                    uploadFileToDrive(imgFile, folderId, oauthToken, uploadEndpoint)
+            // Upload image 1 first if present
+            if (!imageFileName1.isNullOrBlank()) {
+                val imgFile1 = File(contentDir, imageFileName1)
+                if (imgFile1.exists()) {
+                    uploadFileToDrive(imgFile1, folderId, oauthToken, uploadEndpoint)
+                }
+            }
+            // Upload image 2 if present
+            if (!imageFileName2.isNullOrBlank()) {
+                val imgFile2 = File(contentDir, imageFileName2)
+                if (imgFile2.exists()) {
+                    uploadFileToDrive(imgFile2, folderId, oauthToken, uploadEndpoint)
                 }
             }
 
@@ -547,6 +604,12 @@ class SyncRepository(private val context: Context) {
                         val imgFile = File(contentDir, item.localImageName)
                         if (imgFile.exists()) {
                             uploadFileToDrive(imgFile, folderId, oauthToken, uploadEndpoint)
+                        }
+                    }
+                    if (!item.localSecondImageName.isNullOrBlank()) {
+                        val imgFile2 = File(contentDir, item.localSecondImageName)
+                        if (imgFile2.exists()) {
+                            uploadFileToDrive(imgFile2, folderId, oauthToken, uploadEndpoint)
                         }
                     }
                     if (currentJson.isNotEmpty()) {
@@ -721,11 +784,10 @@ class SyncRepository(private val context: Context) {
     }
 
     /**
-     * FIX (c): Restore articles from Google Drive via the Apps Script upload endpoint
+     * Restore articles from Google Drive via the Apps Script endpoint
      * (GET <exec>?action=download&filename=content.json, and download listed images by filename)
      * and merges into local content.json every chapter whose id is missing locally,
-     * then refreshes Home. Do NOT use the Drive API for restore.
-     * If download fails or Drive content.json is empty, show a clear message saying so.
+     * downloading all referenced images (including secondImage and section images) into filesDir/hydraulic_content.
      */
     suspend fun restoreFromDrive(onProgress: (String) -> Unit): SyncResult = withContext(Dispatchers.IO) {
         if (!isOnline()) return@withContext SyncResult.Offline
@@ -767,28 +829,43 @@ class SyncRepository(private val context: Context) {
         val localIds = local.map { it.id }.toSet()
         val missing = driveChapters.filter { it.id !in localIds }
 
-        if (missing.isEmpty()) {
-            val msg = "No missing articles found in Drive — all ${driveChapters.size} Drive articles already exist locally."
-            MMKVStorage.saveSyncResult("success", msg)
-            return@withContext SyncResult.Success(msg, 0)
+        onProgress("Restoring articles and downloading images...")
+
+        // Collect all images from all drive chapters (both missing and existing articles with missing local image files)
+        val imagesToDownload = mutableSetOf<String>()
+        val builtInDrawables = setOf(
+            "img_hose_intro", "img_hose_types", "img_hose_fittings",
+            "img_hose_install", "img_hose_safety", "ic_hydraulic_hose"
+        )
+
+        for (ch in driveChapters) {
+            ch.thumbnail?.takeIf { it.isNotBlank() && !it.startsWith("http") && it !in builtInDrawables }?.let { imagesToDownload.add(it) }
+            ch.secondImage?.takeIf { it.isNotBlank() && !it.startsWith("http") && it !in builtInDrawables }?.let { imagesToDownload.add(it) }
+            for (sec in ch.sections) {
+                sec.image?.takeIf { it.isNotBlank() && !it.startsWith("http") && it !in builtInDrawables }?.let { imagesToDownload.add(it) }
+            }
         }
 
-        onProgress("Restoring ${missing.size} missing article(s) and downloading images...")
-
-        // Download missing images for the restored articles via Apps Script endpoint
-        for (ch in missing) {
-            val imagesToFetch = mutableSetOf<String>()
-            ch.thumbnail?.takeIf { it.isNotBlank() && !it.startsWith("http") }?.let { imagesToFetch.add(it) }
-            for (sec in ch.sections) {
-                sec.image?.takeIf { it.isNotBlank() && !it.startsWith("http") }?.let { imagesToFetch.add(it) }
-            }
-
-            for (imgName in imagesToFetch) {
-                val targetFile = File(contentDir, imgName)
-                if (!targetFile.exists()) {
-                    downloadFileFromAppsScript(uploadEndpoint, customUrl, folderId, imgName, targetFile)
+        var downloadedImagesCount = 0
+        for (imgName in imagesToDownload) {
+            val targetFile = File(contentDir, imgName)
+            if (!targetFile.exists() || !isValidImageFile(targetFile)) {
+                onProgress("Downloading image $imgName...")
+                try {
+                    val success = downloadFileFromAppsScript(uploadEndpoint, customUrl, folderId, imgName, targetFile)
+                    if (success) {
+                        downloadedImagesCount++
+                    }
+                } catch (e: Exception) {
+                    Log.w("SyncRepository", "Skipping missing image $imgName: ${e.message}")
                 }
             }
+        }
+
+        if (missing.isEmpty() && downloadedImagesCount == 0) {
+            val msg = "All ${driveChapters.size} Drive articles and their images already exist locally."
+            MMKVStorage.saveSyncResult("success", msg)
+            return@withContext SyncResult.Success(msg, 0)
         }
 
         // Merge into local content.json
@@ -800,17 +877,37 @@ class SyncRepository(private val context: Context) {
         MMKVStorage.saveLastSyncTime(now)
         val fileList = MMKVStorage.getFileList().toMutableSet()
         fileList.add("content.json")
-        for (ch in missing) {
+        for (ch in driveChapters) {
             ch.thumbnail?.takeIf { it.isNotBlank() }?.let { fileList.add(it) }
+            ch.secondImage?.takeIf { it.isNotBlank() }?.let { fileList.add(it) }
             for (s in ch.sections) {
                 s.image?.takeIf { it.isNotBlank() }?.let { fileList.add(it) }
             }
         }
         MMKVStorage.saveFileList(fileList)
 
-        val successMsg = "Successfully restored ${missing.size} article(s) from Google Drive."
+        val successMsg = if (missing.isNotEmpty()) {
+            "Successfully restored ${missing.size} article(s) and $downloadedImagesCount image(s) from Google Drive."
+        } else {
+            "Successfully restored $downloadedImagesCount missing image(s) from Google Drive."
+        }
         MMKVStorage.saveSyncResult("success", successMsg)
-        return@withContext SyncResult.Success(successMsg, missing.size)
+        return@withContext SyncResult.Success(successMsg, missing.size + downloadedImagesCount)
+    }
+
+    private fun isValidImageFile(file: File): Boolean {
+        if (!file.exists() || file.length() < 16) return false
+        return try {
+            val header = ByteArray(8)
+            file.inputStream().use { it.read(header) }
+            val isJpeg = (header[0] == 0xFF.toByte() && header[1] == 0xD8.toByte())
+            val isPng = (header[0] == 0x89.toByte() && header[1] == 0x50.toByte() && header[2] == 0x4E.toByte() && header[3] == 0x47.toByte())
+            val isRiff = (header[0] == 'R'.code.toByte() && header[1] == 'I'.code.toByte() && header[2] == 'F'.code.toByte() && header[3] == 'F'.code.toByte())
+            val isGif = (header[0] == 'G'.code.toByte() && header[1] == 'I'.code.toByte() && header[2] == 'F'.code.toByte())
+            isJpeg || isPng || isRiff || isGif
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun downloadContentJsonFromAppsScript(
@@ -866,13 +963,43 @@ class SyncRepository(private val context: Context) {
         if (uploadEndpoint.isNotEmpty()) {
             val sep = if (uploadEndpoint.contains("?")) "&" else "?"
             val folderParam = if (folderId.isNotEmpty()) "&folderId=$folderId" else ""
-            val url = "$uploadEndpoint${sep}action=download&filename=$filename$folderParam"
+            val encFilename = try {
+                java.net.URLEncoder.encode(filename, "UTF-8")
+            } catch (_: Exception) {
+                filename
+            }
+            val url = "$uploadEndpoint${sep}action=download&filename=$encFilename$folderParam"
             try {
                 val req = Request.Builder().url(url).build()
                 val resp = client.newCall(req).execute()
                 if (resp.isSuccessful) {
                     val bytes = resp.body?.bytes()
-                    if (bytes != null && bytes.isNotEmpty()) {
+                    if (bytes != null && bytes.size >= 16) {
+                        // Avoid writing HTML error pages as image files
+                        if (bytes[0] == '<'.code.toByte()) {
+                            Log.w("SyncRepository", "Apps Script download returned HTML page instead of image for $filename")
+                            return false
+                        }
+
+                        // Check if returned JSON containing base64 data
+                        if (bytes[0] == '{'.code.toByte()) {
+                            try {
+                                val jsonStr = String(bytes, Charsets.UTF_8)
+                                val obj = JSONObject(jsonStr)
+                                val base64Str = obj.optString("base64").ifBlank { obj.optString("data") }
+                                if (base64Str.isNotBlank()) {
+                                    val decoded = android.util.Base64.decode(base64Str, android.util.Base64.DEFAULT)
+                                    targetFile.writeBytes(decoded)
+                                    MMKVStorage.addToFileList(filename)
+                                    return true
+                                } else if (obj.optString("status") == "error" || obj.has("error")) {
+                                    Log.w("SyncRepository", "Apps Script reported error for $filename: ${obj.optString("message")}")
+                                    return false
+                                }
+                            } catch (_: Exception) {}
+                        }
+
+                        // Raw binary image data
                         targetFile.writeBytes(bytes)
                         MMKVStorage.addToFileList(filename)
                         return true

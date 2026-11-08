@@ -257,6 +257,45 @@ fun DetailScreen(
                 }
             }
 
+            // Primary Article Image (if not already shown in a section)
+            if (!chapter.thumbnail.isNullOrBlank() && chapter.sections.none { it.image == chapter.thumbnail }) {
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp)),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, OutlineBorder)
+                    ) {
+                        Column {
+                            ChapterThumbnail(
+                                imageName = chapter.thumbnail,
+                                contentDescription = chapter.title,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(16f / 9f)
+                            )
+                            Surface(
+                                color = Color(0xFFF1F5F9),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = "Primary Diagram / Reference",
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = TextSecondary,
+                                        fontSize = (12 * fontScale).sp,
+                                        fontWeight = FontWeight.Medium
+                                    ),
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(20.dp))
+                }
+            }
+
             // Sections
             items(chapter.sections) { section ->
                 SectionItem(
@@ -264,6 +303,45 @@ fun DetailScreen(
                     fontScale = fontScale
                 )
                 Spacer(modifier = Modifier.height(24.dp))
+            }
+
+            // Second Article Image (if present)
+            if (!chapter.secondImage.isNullOrBlank() && chapter.sections.none { it.image == chapter.secondImage }) {
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp)),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, OutlineBorder)
+                    ) {
+                        Column {
+                            ChapterThumbnail(
+                                imageName = chapter.secondImage,
+                                contentDescription = "Figure 2: ${chapter.title}",
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(16f / 9f)
+                            )
+                            Surface(
+                                color = Color(0xFFF1F5F9),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = "Figure 2: Additional Technical Diagram / Reference",
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = TextSecondary,
+                                        fontSize = (12 * fontScale).sp,
+                                        fontWeight = FontWeight.Medium
+                                    ),
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(20.dp))
+                }
             }
 
             // Bottom Navigation: Previous & Next Chapter Buttons
