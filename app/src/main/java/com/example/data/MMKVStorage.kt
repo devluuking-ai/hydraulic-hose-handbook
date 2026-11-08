@@ -7,6 +7,8 @@ import org.json.JSONObject
 
 object MMKVStorage {
     private val mmkv: MMKV get() = MMKV.defaultMMKV()
+    fun getBoolean(key: String, default: Boolean = false): Boolean = mmkv.decodeBool(key, default)
+    fun putBoolean(key: String, value: Boolean) = mmkv.encode(key, value)
 
     private const val KEY_FOLDER_ID = "drive_folder_id"
     private const val KEY_DRIVE_API_KEY = "drive_api_key"
