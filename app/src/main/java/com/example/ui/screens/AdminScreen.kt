@@ -82,6 +82,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -138,18 +139,18 @@ fun AdminScreen(
     val isSyncing by viewModel.isSyncing.collectAsState()
     val pendingUploads by viewModel.pendingUploads.collectAsState()
 
-    var selectedAdminTab by remember { mutableIntStateOf(0) }
+    var selectedAdminTab by rememberSaveable { mutableIntStateOf(0) }
     // 0 = Articles List, 1 = Add/Edit Form, 2 = Drive Settings, 3 = Security/PIN
 
     // Form editing state
-    var editingChapterId by remember { mutableStateOf<String?>(null) }
-    var formTitle by remember { mutableStateOf("") }
-    var formCategory by remember { mutableStateOf("Hose Types") }
-    var formSubtitle by remember { mutableStateOf("") }
-    var formReadingTime by remember { mutableStateOf("5") }
-    var formTextContent by remember { mutableStateOf("") }
-    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
-    var existingThumbnailName by remember { mutableStateOf<String?>(null) }
+    var editingChapterId by rememberSaveable { mutableStateOf<String?>(null) }
+    var formTitle by rememberSaveable { mutableStateOf("") }
+    var formCategory by rememberSaveable { mutableStateOf("Hose Types") }
+    var formSubtitle by rememberSaveable { mutableStateOf("") }
+    var formReadingTime by rememberSaveable { mutableStateOf("5") }
+    var formTextContent by rememberSaveable { mutableStateOf("") }
+    var selectedImageUri by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var existingThumbnailName by rememberSaveable { mutableStateOf<String?>(null) }
 
     // Deletion dialog state
     var chapterToDelete by remember { mutableStateOf<Chapter?>(null) }
@@ -158,6 +159,7 @@ fun AdminScreen(
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
+        viewModel.setPickingPhoto(false)
         viewModel.onAdminInteraction()
         if (uri != null) {
             selectedImageUri = uri
@@ -370,6 +372,7 @@ fun AdminScreen(
                         selectedImageUri = selectedImageUri,
                         existingThumbnail = existingThumbnailName,
                         onPickImageClick = {
+                            viewModel.setPickingPhoto(true)
                             photoPickerLauncher.launch(
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                             )
@@ -475,7 +478,7 @@ fun AdminScreen(
             onDismissRequest = { chapterToDelete = null },
             title = { Text("Delete Article?") },
             text = {
-                Text("Are you sure you want to delete '${target.title}'? This will remove it from local files and Google Drive content.")
+                Text("Are you sure you want to delete '${target.title}'? This removes it from this device only. The copy in Google Drive is kept, and you can bring it back with Restore from Drive.")
             },
             confirmButton = {
                 Button(
@@ -1249,7 +1252,7 @@ fun AdminDriveSettingsView(
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = "Manual Sync & Demo Packet",
+                        text = "Manual Sync",
                         style = MaterialTheme.typography.titleMedium.copy(
                             fontWeight = FontWeight.Bold,
                             color = NavyDark
@@ -1279,15 +1282,17 @@ fun AdminDriveSettingsView(
                     OutlinedButton(
                         onClick = {
                             viewModel.onAdminInteraction()
-                            viewModel.loadDemoCloudUpdate()
+                            viewModel.restoreFromDrive { msg ->
+                                onShowSnackbar(msg)
+                            }
                         },
                         enabled = !isSyncing,
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .testTag("admin_demo_sync_btn")
+                            .testTag("admin_restore_drive_btn")
                     ) {
-                        Text("Load Demo Cloud Update (7 Chapters)")
+                        Text("Restore from Drive")
                     }
                 }
             }

@@ -94,6 +94,14 @@ class EbookViewModel(application: Application) : AndroidViewModel(application) {
     // Admin security & lock state
     private val _isAdminUnlocked = MutableStateFlow(false)
     val isAdminUnlocked: StateFlow<Boolean> = _isAdminUnlocked
+    // FIX (a): True while the system photo picker is open.
+    // Auto-lock must not run while picking, or the admin is kicked out of the form.
+    private val _isPickingPhoto = MutableStateFlow(false)
+    val isPickingPhoto: StateFlow<Boolean> = _isPickingPhoto
+    val isPickingImage: StateFlow<Boolean> = _isPickingPhoto
+
+    fun setPickingPhoto(active: Boolean) { _isPickingPhoto.value = active }
+    fun setPickingImage(active: Boolean) { _isPickingPhoto.value = active }
 
     private val _isPinDialogVisible = MutableStateFlow(false)
     val isPinDialogVisible: StateFlow<Boolean> = _isPinDialogVisible
@@ -428,23 +436,32 @@ class EbookViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun loadDemoCloudUpdate() {
-        refreshNetworkState()
+    // FIX (c): Re-add articles deleted locally that still exist in the Drive folder copy.
+    fun restoreFromDrive(onResult: (String) -> Unit = {}) {
         viewModelScope.launch {
             _isSyncing.value = true
-            _syncProgressText.value = "Loading cloud update demo..."
-
-            val result = repository.loadDemoCloudUpdate { progressMsg ->
+            _syncProgressText.value = "Restoring articles from Drive..."
+            val result = repository.restoreFromDrive { progressMsg ->
                 _syncProgressText.value = progressMsg
             }
-
-            if (result is SyncResult.Success) {
-                _syncStatusMessage.value = result.message
-                _lastSyncTime.value = MMKVStorage.getLastSyncTime()
-                _syncedFiles.value = MMKVStorage.getFileList()
-                loadLocalChapters()
+            when (result) {
+                is SyncResult.Success -> {
+                    _syncStatusMessage.value = result.message
+                    _lastSyncTime.value = MMKVStorage.getLastSyncTime()
+                    _syncedFiles.value = MMKVStorage.getFileList()
+                    loadLocalChapters()
+                    onResult(result.message)
+                }
+                is SyncResult.Failure -> {
+                    _syncStatusMessage.value = result.error
+                    onResult(result.error)
+                }
+                is SyncResult.Offline -> {
+                    val offlineMsg = "Device is offline. Reading saved data."
+                    _syncStatusMessage.value = offlineMsg
+                    onResult(offlineMsg)
+                }
             }
-
             _isSyncing.value = false
             _syncProgressText.value = ""
         }

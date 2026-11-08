@@ -42,8 +42,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
-        // Auto-lock admin whenever app is closed or minimized
-        viewModel.lockAdmin()
+        // Auto-lock admin whenever app is closed or minimized, but skip when system photo picker is open
+        if (!viewModel.isPickingPhoto.value) {
+            viewModel.lockAdmin()
+        }
     }
 }
 
@@ -52,6 +54,7 @@ fun EbookApp(viewModel: EbookViewModel) {
     val navController = rememberNavController()
     val selectedChapter by viewModel.selectedChapter.collectAsState()
     val isAdminUnlocked by viewModel.isAdminUnlocked.collectAsState()
+    val isPickingPhoto by viewModel.isPickingPhoto.collectAsState()
 
     NavHost(
         navController = navController,
@@ -102,10 +105,12 @@ fun EbookApp(viewModel: EbookViewModel) {
                     }
                 )
             } else {
-                // If locked, immediately redirect back to home
-                LaunchedEffect(Unit) {
-                    navController.navigate("home") {
-                        popUpTo("home") { inclusive = true }
+                // If locked, immediately redirect back to home (unless picking photo)
+                LaunchedEffect(isPickingPhoto) {
+                    if (!isPickingPhoto) {
+                        navController.navigate("home") {
+                            popUpTo("home") { inclusive = true }
+                        }
                     }
                 }
             }

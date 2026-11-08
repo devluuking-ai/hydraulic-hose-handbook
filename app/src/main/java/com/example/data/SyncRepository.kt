@@ -49,6 +49,7 @@ class SyncRepository(private val context: Context) {
     fun getLocalContentDir(): File = contentDir
 
     fun loadChapters(): List<Chapter> {
+        migrateDemoContentIfNeeded()
         val contentJsonFile = File(contentDir, "content.json")
         val bookmarks = MMKVStorage.getBookmarks()
 
@@ -72,6 +73,45 @@ class SyncRepository(private val context: Context) {
         }
     }
 
+    /**
+     * FIX (b): One-time MMKV migration (flag demo_cleanup_done) that runs on first launch
+     * of the new APK: drops demo chapters 6-7 (chapter_6_troubleshooting, chapter_7_crimper)
+     * and restores chapters 1-5 from DefaultChapters, while KEEPING any admin-added articles
+     * (source 'admin' or id starting with custom_).
+     */
+    private fun migrateDemoContentIfNeeded() {
+        if (MMKVStorage.getBoolean("demo_cleanup_done", false)) return
+
+        val contentJsonFile = File(contentDir, "content.json")
+        val builtIn = DefaultChapters.get()
+        val builtInIds = builtIn.map { it.id }.toSet()
+
+        val currentList: List<Chapter> = if (contentJsonFile.exists() && contentJsonFile.length() > 0) {
+            try {
+                parseChaptersJson(contentJsonFile.readText(), "drive")
+            } catch (e: Exception) {
+                emptyList()
+            }
+        } else {
+            emptyList()
+        }
+
+        // Keep admin created articles, drop demo chapters (chapter_6_troubleshooting, chapter_7_crimper)
+        val adminArticles = currentList.filter { ch ->
+            (ch.source == "admin" || ch.id.startsWith("custom_")) &&
+                    ch.id != "chapter_6_troubleshooting" && ch.id != "chapter_7_crimper" &&
+                    ch.id !in builtInIds
+        }
+
+        val merged = (builtIn + adminArticles).sortedBy { it.order }
+        try {
+            contentJsonFile.writeText(serializeChaptersToJson(merged))
+            MMKVStorage.putBoolean("demo_cleanup_done", true)
+        } catch (e: Exception) {
+            Log.e("SyncRepository", "Demo content cleanup failed", e)
+        }
+    }
+
     private fun parseChaptersJson(jsonString: String, defaultSource: String): List<Chapter> {
         val chapters = mutableListOf<Chapter>()
         val trimmed = jsonString.trim()
@@ -91,6 +131,12 @@ class SyncRepository(private val context: Context) {
         for (i in 0 until jsonArray.length()) {
             val item = jsonArray.getJSONObject(i)
             val id = item.optString("id", "chapter_$i")
+
+            // Skip removed demo chapters 6 and 7 if present in Drive content.json
+            if (id == "chapter_6_troubleshooting" || id == "chapter_7_crimper") {
+                continue
+            }
+
             val title = item.optString("title", "Untitled Chapter")
             val subtitle = item.optString("subtitle", "")
             val category = item.optString("category", "General")
@@ -315,15 +361,16 @@ class SyncRepository(private val context: Context) {
     }
 
     /**
-     * Admin: Delete an article.
-     * Removes from content.json, removes associated image, updates MMKV,
-     * updates Drive or queues deletion.
+     * FIX (c): Delete an article locally ONLY.
+     * Removes from local content.json and filesDir cache.
+     * Does NOT delete it from Google Drive permanently (leaves Drive copy content.json and images untouched).
+     * No Drive upload of post-delete content.json and no DELETE pending-upload queueing.
      */
     suspend fun deleteArticle(articleId: String): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         val currentChapters = loadChapters().toMutableList()
         val target = currentChapters.find { it.id == articleId } ?: return@withContext Pair(false, "Article not found")
 
-        // If local custom image exists, remove it
+        // If local custom image exists, remove it locally
         if (!target.thumbnail.isNullOrBlank()) {
             val imgFile = File(contentDir, target.thumbnail)
             if (imgFile.exists()) {
@@ -334,7 +381,7 @@ class SyncRepository(private val context: Context) {
 
         currentChapters.removeAll { it.id == articleId }
 
-        // Update content.json
+        // Update content.json locally
         val contentJsonFile = File(contentDir, "content.json")
         val jsonString = serializeChaptersToJson(currentChapters)
         contentJsonFile.writeText(jsonString)
@@ -342,28 +389,7 @@ class SyncRepository(private val context: Context) {
         val now = System.currentTimeMillis()
         MMKVStorage.saveLastSyncTime(now)
 
-        val isNetAvailable = isOnline()
-        val folderId = extractFolderId(MMKVStorage.getFolderId())
-        val oauthToken = MMKVStorage.getDriveOAuthToken()
-        val uploadEndpoint = MMKVStorage.getDriveUploadEndpoint()
-
-        var msg = "Deleted locally."
-        if (isNetAvailable && folderId.isNotEmpty() && (oauthToken.isNotEmpty() || uploadEndpoint.isNotEmpty())) {
-            uploadContentJsonToDrive(jsonString, folderId, oauthToken, uploadEndpoint)
-            msg = "Deleted from local cache and Drive."
-        } else {
-            MMKVStorage.addPendingUpload(
-                PendingUpload(
-                    id = UUID.randomUUID().toString(),
-                    action = "DELETE",
-                    articleId = articleId,
-                    title = target.title
-                )
-            )
-            msg = "Deleted locally, Drive deletion queued."
-        }
-
-        return@withContext Pair(true, msg)
+        return@withContext Pair(true, "Deleted locally. Drive copy preserved.")
     }
 
     /**
@@ -529,9 +555,7 @@ class SyncRepository(private val context: Context) {
                     MMKVStorage.removePendingUpload(item.id)
                     successCount++
                 } else if (item.action == "DELETE") {
-                    if (currentJson.isNotEmpty()) {
-                        uploadContentJsonToDrive(currentJson, folderId, oauthToken, uploadEndpoint)
-                    }
+                    // Delete is strictly local; drop any stale DELETE items from older queues
                     MMKVStorage.removePendingUpload(item.id)
                     successCount++
                 }
@@ -566,7 +590,7 @@ class SyncRepository(private val context: Context) {
         val folderId = extractFolderId(rawFolderId)
 
         if (folderId.isEmpty() && customUrl.isEmpty()) {
-            return@withContext SyncResult.Failure("No Google Drive Folder ID or Sync URL configured. Please enter Folder ID in Settings.")
+            return@withContext SyncResult.Failure("No Google Drive Folder ID or Sync URL configured. Please enter Folder ID in Admin Settings.")
         }
 
         try {
@@ -579,7 +603,7 @@ class SyncRepository(private val context: Context) {
                 onProgress("Querying Google Drive API for folder contents...")
                 return@withContext syncViaDriveApi(folderId, apiKey, onProgress)
             } else {
-                onProgress("Attempting direct sync with folder ID...")
+                onProgress("Checking Drive API Key...")
                 return@withContext syncDirectOrPromptApiKey(folderId, onProgress)
             }
         } catch (e: Exception) {
@@ -656,12 +680,15 @@ class SyncRepository(private val context: Context) {
         return SyncResult.Success("Synced ${downloadedFiles.size} files from Google Drive", downloadedFiles.size)
     }
 
+    /**
+     * FIX (b): Plain explanation when syncing without a Drive API key.
+     * No dead-end, no demo fallback.
+     */
     private fun syncDirectOrPromptApiKey(
         folderId: String,
         onProgress: (String) -> Unit
     ): SyncResult {
-        onProgress("Checking public Drive link...")
-        val msg = "Google Drive folder sync requires a free Google Drive API Key to query folder contents without user login. Please add an API Key in Admin Settings, or use 'Load Demo Cloud Update' to test full sync."
+        val msg = "Google Drive folder sync requires a free Google Drive API Key to query folder contents without user login. Please add an API Key in Admin Settings."
         MMKVStorage.saveSyncResult("notice", msg)
         return SyncResult.Failure(msg)
     }
@@ -693,183 +720,169 @@ class SyncRepository(private val context: Context) {
         return SyncResult.Success("Synced content.json successfully", 1)
     }
 
-    suspend fun loadDemoCloudUpdate(onProgress: (String) -> Unit): SyncResult = withContext(Dispatchers.IO) {
-        onProgress("Initializing demo cloud data packet...")
-        kotlinx.coroutines.delay(300)
-        onProgress("Formatting content.json with 7 complete chapters...")
-        kotlinx.coroutines.delay(300)
+    /**
+     * FIX (c): Restore articles from Google Drive via the Apps Script upload endpoint
+     * (GET <exec>?action=download&filename=content.json, and download listed images by filename)
+     * and merges into local content.json every chapter whose id is missing locally,
+     * then refreshes Home. Do NOT use the Drive API for restore.
+     * If download fails or Drive content.json is empty, show a clear message saying so.
+     */
+    suspend fun restoreFromDrive(onProgress: (String) -> Unit): SyncResult = withContext(Dispatchers.IO) {
+        if (!isOnline()) return@withContext SyncResult.Offline
 
-        val demoChaptersJson = """
-        {
-          "version": 2,
-          "title": "Hydraulic Hose Master Handbook (Cloud Synced Edition)",
-          "lastUpdated": ${System.currentTimeMillis()},
-          "chapters": [
-            {
-              "id": "chapter_1_intro",
-              "order": 1,
-              "title": "Chapter 1: Introduction to Hydraulic Hoses",
-              "subtitle": "Principles of High-Pressure Fluid Power (Updated v2.1)",
-              "category": "Fundamentals",
-              "readingTimeMinutes": 4,
-              "thumbnail": "img_hose_intro",
-              "summary": "Updated guide with added pressure envelope charts: inner tube, reinforcement layers, and outer cover, plus working pressure vs burst pressure design safety factors.",
-              "sections": [
-                {
-                  "heading": "1.1 The Role of Hydraulic Hoses",
-                  "text": "A hydraulic hose is a high-pressure, flexible conduit designed to transmit pressurized fluid between pumps, control valves, actuators, cylinders, and motors. Unlike rigid steel piping, hydraulic hoses absorb mechanical vibrations, tolerate thermal expansion, and allow fluid power transmission across articulating machine parts.",
-                  "image": "img_hose_intro",
-                  "caption": "Figure 1.1: Anatomical cutaway of high-pressure hydraulic hose."
-                },
-                {
-                  "heading": "1.2 Updated Pressure & Impulse Guidelines",
-                  "text": "Modern dynamic duty cycles necessitate strict adherence to SAE 100R ratings. Standard dynamic safety factor remains 4:1 (burst pressure = 4x working pressure). Static hydraulic applications may operate at a 3:1 safety factor.",
-                  "calloutType": "INFO",
-                  "calloutTitle": "Updated Cloud Spec",
-                  "calloutText": "Fluid velocity must be kept between 10-25 ft/s on pressure lines to minimize internal laminar turbulence."
-                }
-              ]
-            },
-            {
-              "id": "chapter_2_types",
-              "order": 2,
-              "title": "Chapter 2: Hydraulic Hose Types & Ratings",
-              "subtitle": "SAE Specifications, Wire Braid vs. Spiral",
-              "category": "Hose Types",
-              "readingTimeMinutes": 5,
-              "thumbnail": "img_hose_types",
-              "summary": "Explore SAE 100R standards (100R1, 100R2, 100R12, 100R13/R15), compare braided vs spiral wire reinforcement, and master the STAMPED sizing methodology.",
-              "sections": [
-                {
-                  "heading": "2.1 Wire Braid vs Spiral Wire Fatigue Resistance",
-                  "text": "Spiral reinforced hoses provide superior cycle life under aggressive pressure surges. In continuous cyclic testing, four-spiral hoses exceed 500,000 impulse cycles without wire strand crossing fatigue.",
-                  "image": "img_hose_types",
-                  "caption": "Figure 2.1: Wire braid vs four spiral wire cross section."
-                }
-              ]
-            },
-            {
-              "id": "chapter_3_fittings",
-              "order": 3,
-              "title": "Chapter 3: Fittings, Couplings & Thread Identification",
-              "subtitle": "JIC 37°, ORFS, NPT & Crimp Assembly",
-              "category": "Fittings",
-              "readingTimeMinutes": 5,
-              "thumbnail": "img_hose_fittings",
-              "summary": "Identify hydraulic coupling standards: JIC 37° flare, O-Ring Face Seal (ORFS), NPT pipe threads, and permanent crimped ferrule tolerances.",
-              "sections": [
-                {
-                  "heading": "3.1 Zero-Leakage Connection Best Practices",
-                  "text": "ORFS (O-Ring Face Seal) fittings are the premier recommendation for high-vibration off-highway equipment. Unlike tapered pipe threads, ORFS seals on a replaceable elastomer face, eliminating thread distortion.",
-                  "image": "img_hose_fittings",
-                  "caption": "Figure 3.1: JIC 37°, ORFS, and NPT fitting mechanics."
-                }
-              ]
-            },
-            {
-              "id": "chapter_4_install",
-              "order": 4,
-              "title": "Chapter 4: Installation & Routing Best Practices",
-              "subtitle": "Bend Radius, Layline Alignment & Clamping",
-              "category": "Installation",
-              "readingTimeMinutes": 5,
-              "thumbnail": "img_hose_install",
-              "summary": "Master correct hose routing techniques: avoiding twists using the printed layline, respecting minimum bend radiuses, and installing proper clamp supports.",
-              "sections": [
-                {
-                  "heading": "4.1 Preventing Premature Failures",
-                  "text": "Always observe the printed layline. Never allow the hose to twist during swivel nut torquing. Use two wrenches for all swivel installations.",
-                  "image": "img_hose_install",
-                  "caption": "Figure 4.1: Correct vs incorrect bend radius and clamping."
-                }
-              ]
-            },
-            {
-              "id": "chapter_5_safety",
-              "order": 5,
-              "title": "Chapter 5: Maintenance, Inspection & Safety Protocols",
-              "subtitle": "Fluid Injection Hazards, Cardboard Test & Inspections",
-              "category": "Safety",
-              "readingTimeMinutes": 6,
-              "thumbnail": "img_hose_safety",
-              "summary": "Critical safety standards for hydraulic technicians: high-pressure fluid injection injury prevention, the cardboard leak test, and daily inspection checkpoints.",
-              "sections": [
-                {
-                  "heading": "5.1 Urgent Safety Protocol",
-                  "text": "Never touch pressurized hydraulic lines. Even pinholes can inject mineral oil beneath human skin, creating emergency necrosis. Always use cardboard on a wand.",
-                  "image": "img_hose_safety",
-                  "caption": "Figure 5.1: High pressure fluid injection risks."
-                }
-              ]
-            },
-            {
-              "id": "chapter_6_troubleshooting",
-              "order": 6,
-              "title": "Chapter 6: Field Troubleshooting & Pressure Spikes",
-              "subtitle": "Diagnosing Water Hammer, Thermal Shock & Blow-offs",
-              "category": "Field Diagnostics",
-              "readingTimeMinutes": 6,
-              "thumbnail": "img_hose_types",
-              "summary": "A cloud-synced diagnostic chapter: how to identify failure patterns such as burst at outer radius, coupling detachment, and inner tube hardening.",
-              "sections": [
-                {
-                  "heading": "6.1 Diagnostic Failure Modes Table",
-                  "text": "• Fitting Blow-off: Caused by improper crimp diameter, lack of skiving, or undersized ferrule teeth.\n• Hose Bursts at Outer Bend: Exceeded minimum bend radius; outer wires stretched beyond yield point.\n• Tube Hard and Brittle: Fluid operating temperature exceeded rated maximum (+121°C), baking the elastomer.\n• Pinholes Near Coupling: Stress concentration due to unsupported hose hanging off rigid port."
-                },
-                {
-                  "heading": "6.2 Water Hammer & Surge Dampening",
-                  "text": "Rapidly closing solenoid valves creates destructive pressure waves that travel back through hydraulic fluid at roughly 4,000 ft/sec. To protect hose assemblies, install inline hydraulic accumulators or proportional deceleration valves.",
-                  "calloutType": "WARNING",
-                  "calloutTitle": "Surge Spike Alert",
-                  "calloutText": "High-frequency pressure transducers reveal that system spikes often peak at 300% of nominal relief valve pressure within 15 milliseconds."
-                }
-              ]
-            },
-            {
-              "id": "chapter_7_crimper",
-              "order": 7,
-              "title": "Chapter 7: Crimper Calibration & Tolerances",
-              "subtitle": "Micrometer Verification & Proof Pressure Testing",
-              "category": "Maintenance",
-              "readingTimeMinutes": 5,
-              "thumbnail": "img_hose_fittings",
-              "summary": "Standards for shop crimpers: calibration routines, die wear compensation, and hydrostatic pressure proof testing protocols.",
-              "sections": [
-                {
-                  "heading": "7.1 Daily Crimper Verification",
-                  "text": "Before assembling production hose batches:\n1. Inspect crimper die fingers for galling, metal chips, and grease contamination.\n2. Verify micrometer dial zero against a known calibration plug.\n3. Measure finished crimp diameter on the ferrule rib with a digital vernier caliper across two perpendicular axes."
-                },
-                {
-                  "heading": "7.2 Hydrostatic Proof Testing (SAE J343)",
-                  "text": "Critical safety assemblies should undergo hydrostatic proof testing at 2.0x rated working pressure for 60 seconds with water. If no leakage, drop in pressure, or coupling movement is observed, the assembly is certified for service.",
-                  "calloutType": "TIP",
-                  "calloutTitle": "Quality Control Rule",
-                  "calloutText": "Log every assembly with serial numbers, crimp diameter, technician initials, and date code on an aluminum hose tag."
-                }
-              ]
+        val uploadEndpoint = MMKVStorage.getDriveUploadEndpoint().trim()
+        val customUrl = MMKVStorage.getCustomSyncUrl().trim()
+        val folderId = extractFolderId(MMKVStorage.getFolderId())
+
+        if (uploadEndpoint.isEmpty() && customUrl.isEmpty()) {
+            val msg = "Restore failed: No Apps Script endpoint or Sync URL configured in Admin Settings."
+            MMKVStorage.saveSyncResult("error", msg)
+            return@withContext SyncResult.Failure(msg)
+        }
+
+        onProgress("Downloading content.json from Google Drive via Apps Script...")
+
+        val driveJson: String? = downloadContentJsonFromAppsScript(uploadEndpoint, customUrl, folderId)
+        if (driveJson.isNullOrBlank()) {
+            val msg = "Restore failed: Could not download content.json from Drive (endpoint returned empty or error). Verify the Apps Script URL in Admin Settings."
+            MMKVStorage.saveSyncResult("error", msg)
+            return@withContext SyncResult.Failure(msg)
+        }
+
+        val driveChapters = try {
+            parseChaptersJson(driveJson, "drive")
+        } catch (e: Exception) {
+            val msg = "Restore failed: Invalid content.json format from Drive: ${e.localizedMessage}"
+            MMKVStorage.saveSyncResult("error", msg)
+            return@withContext SyncResult.Failure(msg)
+        }
+
+        if (driveChapters.isEmpty()) {
+            val msg = "Drive folder content.json contains no articles."
+            MMKVStorage.saveSyncResult("warning", msg)
+            return@withContext SyncResult.Failure(msg)
+        }
+
+        val local = loadChapters()
+        val localIds = local.map { it.id }.toSet()
+        val missing = driveChapters.filter { it.id !in localIds }
+
+        if (missing.isEmpty()) {
+            val msg = "No missing articles found in Drive — all ${driveChapters.size} Drive articles already exist locally."
+            MMKVStorage.saveSyncResult("success", msg)
+            return@withContext SyncResult.Success(msg, 0)
+        }
+
+        onProgress("Restoring ${missing.size} missing article(s) and downloading images...")
+
+        // Download missing images for the restored articles via Apps Script endpoint
+        for (ch in missing) {
+            val imagesToFetch = mutableSetOf<String>()
+            ch.thumbnail?.takeIf { it.isNotBlank() && !it.startsWith("http") }?.let { imagesToFetch.add(it) }
+            for (sec in ch.sections) {
+                sec.image?.takeIf { it.isNotBlank() && !it.startsWith("http") }?.let { imagesToFetch.add(it) }
             }
-          ]
+
+            for (imgName in imagesToFetch) {
+                val targetFile = File(contentDir, imgName)
+                if (!targetFile.exists()) {
+                    downloadFileFromAppsScript(uploadEndpoint, customUrl, folderId, imgName, targetFile)
+                }
+            }
         }
-        """.trimIndent()
 
-        onProgress("Saving updated content to internal filesDir...")
-        val target = File(contentDir, "content.json")
-        target.writeText(demoChaptersJson)
+        // Merge into local content.json
+        val merged = (local + missing).sortedBy { it.order }
+        val contentJsonFile = File(contentDir, "content.json")
+        contentJsonFile.writeText(serializeChaptersToJson(merged))
 
-        val files = setOf("content.json", "img_hose_intro.jpg", "img_hose_types.jpg", "img_hose_fittings.jpg", "img_hose_install.jpg", "img_hose_safety.jpg")
         val now = System.currentTimeMillis()
-        val indexObj = JSONObject().apply {
-            put("content.json", now.toString())
-            put("version", 2)
+        MMKVStorage.saveLastSyncTime(now)
+        val fileList = MMKVStorage.getFileList().toMutableSet()
+        fileList.add("content.json")
+        for (ch in missing) {
+            ch.thumbnail?.takeIf { it.isNotBlank() }?.let { fileList.add(it) }
+            for (s in ch.sections) {
+                s.image?.takeIf { it.isNotBlank() }?.let { fileList.add(it) }
+            }
+        }
+        MMKVStorage.saveFileList(fileList)
+
+        val successMsg = "Successfully restored ${missing.size} article(s) from Google Drive."
+        MMKVStorage.saveSyncResult("success", successMsg)
+        return@withContext SyncResult.Success(successMsg, missing.size)
+    }
+
+    private fun downloadContentJsonFromAppsScript(
+        uploadEndpoint: String,
+        customUrl: String,
+        folderId: String
+    ): String? {
+        // 1. Try Apps Script GET: <exec>?action=download&filename=content.json&folderId=...
+        if (uploadEndpoint.isNotEmpty()) {
+            val sep = if (uploadEndpoint.contains("?")) "&" else "?"
+            val folderParam = if (folderId.isNotEmpty()) "&folderId=$folderId" else ""
+            val url = "$uploadEndpoint${sep}action=download&filename=content.json$folderParam"
+            try {
+                val req = Request.Builder().url(url).build()
+                val resp = client.newCall(req).execute()
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string()
+                    if (!body.isNullOrBlank() && (body.contains("chapters") || body.contains("articles") || body.startsWith("["))) {
+                        return body
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("SyncRepository", "Apps Script content.json download failed: ${e.message}")
+            }
         }
 
-        MMKVStorage.saveLastSyncTime(now)
-        MMKVStorage.saveFileList(files)
-        MMKVStorage.saveSyncIndex(indexObj.toString())
-        MMKVStorage.saveSyncResult("success", "Synced 7 chapters and updated specifications from cloud storage.")
+        // 2. Try customUrl if present
+        if (customUrl.isNotEmpty()) {
+            try {
+                val req = Request.Builder().url(customUrl).build()
+                val resp = client.newCall(req).execute()
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string()
+                    if (!body.isNullOrBlank() && (body.contains("chapters") || body.contains("articles") || body.startsWith("["))) {
+                        return body
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("SyncRepository", "CustomUrl content.json download failed: ${e.message}")
+            }
+        }
 
-        onProgress("Sync complete!")
-        SyncResult.Success("Successfully synced 7 chapters and specifications.", files.size)
+        return null
+    }
+
+    private fun downloadFileFromAppsScript(
+        uploadEndpoint: String,
+        customUrl: String,
+        folderId: String,
+        filename: String,
+        targetFile: File
+    ): Boolean {
+        if (uploadEndpoint.isNotEmpty()) {
+            val sep = if (uploadEndpoint.contains("?")) "&" else "?"
+            val folderParam = if (folderId.isNotEmpty()) "&folderId=$folderId" else ""
+            val url = "$uploadEndpoint${sep}action=download&filename=$filename$folderParam"
+            try {
+                val req = Request.Builder().url(url).build()
+                val resp = client.newCall(req).execute()
+                if (resp.isSuccessful) {
+                    val bytes = resp.body?.bytes()
+                    if (bytes != null && bytes.isNotEmpty()) {
+                        targetFile.writeBytes(bytes)
+                        MMKVStorage.addToFileList(filename)
+                        return true
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("SyncRepository", "Failed downloading image $filename from Apps Script: ${e.message}")
+            }
+        }
+        return false
     }
 
     fun clearSavedData(): Boolean {
@@ -884,7 +897,7 @@ class SyncRepository(private val context: Context) {
         }
     }
 
-    private fun extractFolderId(input: String): String {
+    fun extractFolderId(input: String): String {
         val trimmed = input.trim()
         if (trimmed.contains("/folders/")) {
             return trimmed.substringAfter("/folders/").substringBefore("?").substringBefore("/")
