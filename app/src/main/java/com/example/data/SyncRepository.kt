@@ -39,7 +39,7 @@ class SyncRepository(private val context: Context) {
     private val imageDownloadClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
-        .callTimeout(60, TimeUnit.SECONDS)
+        .callTimeout(5, TimeUnit.MINUTES)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
