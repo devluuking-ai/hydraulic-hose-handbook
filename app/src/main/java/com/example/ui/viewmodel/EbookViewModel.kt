@@ -10,7 +10,9 @@ import com.example.data.MMKVStorage
 import com.example.data.SyncRepository
 import com.example.data.SyncResult
 import com.example.model.Chapter
+import com.example.model.DriveFileInfo
 import com.example.model.PendingUpload
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -96,6 +98,20 @@ class EbookViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _pendingUploads = MutableStateFlow<List<PendingUpload>>(MMKVStorage.getPendingUploads())
     val pendingUploads: StateFlow<List<PendingUpload>> = _pendingUploads
+
+    // On-demand image downloading state for Reader detail view
+    private val _downloadingImages = MutableStateFlow<Set<String>>(emptySet())
+    val downloadingImages: StateFlow<Set<String>> = _downloadingImages
+
+    // Admin Drive Files screen state
+    private val _driveFiles = MutableStateFlow<List<DriveFileInfo>>(emptyList())
+    val driveFiles: StateFlow<List<DriveFileInfo>> = _driveFiles
+
+    private val _isLoadingDriveFiles = MutableStateFlow(false)
+    val isLoadingDriveFiles: StateFlow<Boolean> = _isLoadingDriveFiles
+
+    private val _driveFilesError = MutableStateFlow<String?>(null)
+    val driveFilesError: StateFlow<String?> = _driveFilesError
 
     // Admin security & lock state
     private val _isAdminUnlocked = MutableStateFlow(false)
@@ -394,18 +410,80 @@ class EbookViewModel(application: Application) : AndroidViewModel(application) {
         saveArticle(article, imageBytes, imageExtension, null, "jpg", onComplete)
     }
 
-    // Admin Delete Article
-    fun deleteArticle(articleId: String, onComplete: (String) -> Unit) {
+    fun requestImageDownload(imageName: String?) {
+        if (imageName.isNullOrBlank()) return
+        val builtInDrawables = setOf(
+            "img_hose_intro", "img_hose_types", "img_hose_fittings",
+            "img_hose_install", "img_hose_safety", "ic_hydraulic_hose"
+        )
+        if (imageName in builtInDrawables || imageName.startsWith("http")) return
+        val targetFile = File(repository.getLocalContentDir(), imageName)
+        if (targetFile.exists() && repository.isValidImageFile(targetFile)) return
+        if (_downloadingImages.value.contains(imageName)) return
+        if (!repository.isOnline()) return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            _downloadingImages.value = _downloadingImages.value + imageName
+            val success = repository.downloadImageFile(imageName)
+            _downloadingImages.value = _downloadingImages.value - imageName
+            if (success) {
+                loadLocalChapters()
+            }
+        }
+    }
+
+    // Admin Delete Article (supports local-only default and optional Drive deletion)
+    fun deleteArticle(articleId: String, alsoDeleteFromDrive: Boolean = false, onComplete: (String) -> Unit) {
         onAdminInteraction()
         viewModelScope.launch {
             _isSyncing.value = true
-            _syncProgressText.value = "Deleting article..."
+            _syncProgressText.value = if (alsoDeleteFromDrive) "Deleting from phone & Google Drive..." else "Deleting article locally..."
 
-            val (success, msg) = repository.deleteArticle(articleId)
+            val (success, msg) = repository.deleteArticle(articleId, alsoDeleteFromDrive)
             loadLocalChapters()
             _isSyncing.value = false
             _syncProgressText.value = ""
             onComplete(msg)
+        }
+    }
+
+    fun deleteArticle(articleId: String, onComplete: (String) -> Unit) {
+        deleteArticle(articleId, alsoDeleteFromDrive = false, onComplete = onComplete)
+    }
+
+    // Admin Drive Files management
+    fun loadDriveFiles() {
+        onAdminInteraction()
+        viewModelScope.launch {
+            _isLoadingDriveFiles.value = true
+            _driveFilesError.value = null
+            try {
+                val list = repository.listDriveFiles()
+                _driveFiles.value = list
+                if (list.isEmpty() && !repository.isOnline()) {
+                    _driveFilesError.value = "Device is offline. Connect to internet to view Drive files."
+                }
+            } catch (e: Exception) {
+                _driveFilesError.value = e.localizedMessage ?: "Failed to list Drive files"
+            } finally {
+                _isLoadingDriveFiles.value = false
+            }
+        }
+    }
+
+    fun deleteDriveFile(fileName: String, onComplete: (Boolean, String) -> Unit) {
+        onAdminInteraction()
+        viewModelScope.launch {
+            _isLoadingDriveFiles.value = true
+            val success = repository.deleteDriveFile(fileName)
+            if (success) {
+                _driveFiles.value = _driveFiles.value.filter { it.name != fileName }
+                loadLocalChapters()
+                onComplete(true, "Drive ထဲက ဖိုင် '$fileName' ကို ဖျက်ပြီးပါပြီ။")
+            } else {
+                onComplete(false, "ဖိုင်ဖျက်၍ မရပါ (ကွန်ရက် သို့မဟုတ် Apps Script အမှား)။")
+            }
+            _isLoadingDriveFiles.value = false
         }
     }
 

@@ -42,3 +42,10 @@ data class PendingUpload(
     val localSecondImageName: String? = null,
     val timestamp: Long = System.currentTimeMillis()
 )
+
+data class DriveFileInfo(
+    val name: String,
+    val mimeType: String = "",
+    val size: Long = 0L,
+    val modifiedTime: String = ""
+)

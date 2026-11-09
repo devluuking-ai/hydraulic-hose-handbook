@@ -7,6 +7,7 @@ import android.util.Log
 import com.example.model.CalloutType
 import com.example.model.Chapter
 import com.example.model.ChapterSection
+import com.example.model.DriveFileInfo
 import com.example.model.PendingUpload
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -403,17 +404,18 @@ class SyncRepository(private val context: Context) {
     ): Pair<Chapter, String> = saveOrUpdateArticle(article, imageBytes, imageExtension, null, "jpg")
 
     /**
-     * Delete an article locally ONLY.
-     * Removes from local content.json and filesDir cache.
-     * Does NOT delete it from Google Drive permanently (leaves Drive copy content.json and images untouched).
-     * No Drive upload of post-delete content.json and no DELETE pending-upload queueing.
+     * Admin: Delete an article.
+     * Default: local only ('ဖုန်းထဲမှာပဲ ဖျက်', preserving Drive copy).
+     * Optional: 'Drive ထဲကပါ ဖျက်' (also removes from Drive content.json and trashes its images in Drive).
      */
-    suspend fun deleteArticle(articleId: String): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+    suspend fun deleteArticle(articleId: String, alsoDeleteFromDrive: Boolean = false): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         val currentChapters = loadChapters().toMutableList()
         val target = currentChapters.find { it.id == articleId } ?: return@withContext Pair(false, "Article not found")
 
+        val imagesToDelete = mutableListOf<String>()
         // If local custom images exist, remove locally
         if (!target.thumbnail.isNullOrBlank()) {
+            imagesToDelete.add(target.thumbnail)
             val imgFile = File(contentDir, target.thumbnail)
             if (imgFile.exists()) {
                 imgFile.delete()
@@ -421,10 +423,21 @@ class SyncRepository(private val context: Context) {
             }
         }
         if (!target.secondImage.isNullOrBlank()) {
+            imagesToDelete.add(target.secondImage)
             val imgFile2 = File(contentDir, target.secondImage)
             if (imgFile2.exists()) {
                 imgFile2.delete()
                 MMKVStorage.removeFromFileList(target.secondImage)
+            }
+        }
+        for (sec in target.sections) {
+            sec.image?.takeIf { it.isNotBlank() }?.let {
+                imagesToDelete.add(it)
+                val imgFileSec = File(contentDir, it)
+                if (imgFileSec.exists()) {
+                    imgFileSec.delete()
+                    MMKVStorage.removeFromFileList(it)
+                }
             }
         }
 
@@ -438,7 +451,29 @@ class SyncRepository(private val context: Context) {
         val now = System.currentTimeMillis()
         MMKVStorage.saveLastSyncTime(now)
 
-        return@withContext Pair(true, "Deleted locally. Drive copy preserved.")
+        if (alsoDeleteFromDrive) {
+            val folderId = extractFolderId(MMKVStorage.getFolderId())
+            val oauthToken = MMKVStorage.getDriveOAuthToken()
+            val uploadEndpoint = MMKVStorage.getDriveUploadEndpoint()
+
+            // Update Drive content.json
+            uploadContentJsonToDrive(jsonString, folderId, oauthToken, uploadEndpoint)
+
+            // Trash referenced image files in Drive via Apps Script
+            val builtInDrawables = setOf(
+                "img_hose_intro", "img_hose_types", "img_hose_fittings",
+                "img_hose_install", "img_hose_safety", "ic_hydraulic_hose"
+            )
+            for (img in imagesToDelete) {
+                if (img !in builtInDrawables && !img.startsWith("http")) {
+                    deleteDriveFile(img, folderId)
+                }
+            }
+
+            return@withContext Pair(true, "ဖုန်းနှင့် Google Drive နှစ်ခုစလုံးမှ ဖျက်ပြီးပါပြီ။")
+        }
+
+        return@withContext Pair(true, "ဖုန်းထဲမှာပဲ ဖျက်ပြီးပါပြီ။ Drive copy ကို ထိန်းသိမ်းထားပါသည်။")
     }
 
     /**
@@ -715,37 +750,21 @@ class SyncRepository(private val context: Context) {
                             }
                         }
 
-                        // Validate images on chapters: if an image is corrupt or missing, do NOT mark the article as having a valid image
-                        val verifiedChapters = driveChapters.map { ch ->
-                            val validThumb = if (ch.thumbnail in builtInDrawables) {
-                                ch.thumbnail
-                            } else if (!ch.thumbnail.isNullOrBlank()) {
-                                val f = File(contentDir, ch.thumbnail)
-                                if (f.exists() && isValidImageFile(f)) ch.thumbnail else null
-                            } else null
-
-                            val validSecond = if (ch.secondImage in builtInDrawables) {
-                                ch.secondImage
-                            } else if (!ch.secondImage.isNullOrBlank()) {
-                                val f = File(contentDir, ch.secondImage)
-                                if (f.exists() && isValidImageFile(f)) ch.secondImage else null
-                            } else null
-
-                            ch.copy(
-                                thumbnail = validThumb,
-                                secondImage = validSecond
-                            )
+                        // Preserve chapter image filenames so reader and on-demand loader always know which image to display
+                        val bookmarks = MMKVStorage.getBookmarks()
+                        val chaptersToSave = driveChapters.map { ch ->
+                            ch.copy(isBookmarked = bookmarks.contains(ch.id))
                         }.sortedBy { it.order }
 
                         // Save updated content.json to local storage
                         val contentJsonFile = File(contentDir, "content.json")
-                        contentJsonFile.writeText(serializeChaptersToJson(verifiedChapters))
+                        contentJsonFile.writeText(serializeChaptersToJson(chaptersToSave))
 
                         val now = System.currentTimeMillis()
                         MMKVStorage.saveLastSyncTime(now)
                         val fileList = MMKVStorage.getFileList().toMutableSet()
                         fileList.add("content.json")
-                        for (ch in verifiedChapters) {
+                        for (ch in chaptersToSave) {
                             ch.thumbnail?.takeIf { it.isNotBlank() }?.let { fileList.add(it) }
                             ch.secondImage?.takeIf { it.isNotBlank() }?.let { fileList.add(it) }
                             for (s in ch.sections) {
@@ -754,9 +773,9 @@ class SyncRepository(private val context: Context) {
                         }
                         MMKVStorage.saveFileList(fileList)
 
-                        val msg = "Handbook updated from Google Drive (${verifiedChapters.size} chapters)"
+                        val msg = "Handbook updated from Google Drive (${chaptersToSave.size} chapters)"
                         MMKVStorage.saveSyncResult("success", msg)
-                        return@withContext SyncResult.Success(msg, verifiedChapters.size + downloadedCount)
+                        return@withContext SyncResult.Success(msg, chaptersToSave.size + downloadedCount)
                     }
                 }
             }
@@ -962,30 +981,8 @@ class SyncRepository(private val context: Context) {
             return@withContext SyncResult.Success(msg, 0)
         }
 
-        // Validate images for missing chapters before merging
-        val verifiedMissing = missing.map { ch ->
-            val validThumb = if (ch.thumbnail in builtInDrawables) {
-                ch.thumbnail
-            } else if (!ch.thumbnail.isNullOrBlank()) {
-                val f = File(contentDir, ch.thumbnail)
-                if (f.exists() && isValidImageFile(f)) ch.thumbnail else null
-            } else null
-
-            val validSecond = if (ch.secondImage in builtInDrawables) {
-                ch.secondImage
-            } else if (!ch.secondImage.isNullOrBlank()) {
-                val f = File(contentDir, ch.secondImage)
-                if (f.exists() && isValidImageFile(f)) ch.secondImage else null
-            } else null
-
-            ch.copy(
-                thumbnail = validThumb,
-                secondImage = validSecond
-            )
-        }
-
-        // Merge into local content.json
-        val merged = (local + verifiedMissing).sortedBy { it.order }
+        // Merge missing chapters into local content.json (preserving image filenames for on-demand loading)
+        val merged = (local + missing).sortedBy { it.order }
         val contentJsonFile = File(contentDir, "content.json")
         contentJsonFile.writeText(serializeChaptersToJson(merged))
 
@@ -1144,6 +1141,111 @@ class SyncRepository(private val context: Context) {
             }
         }
         return false
+    }
+
+    /**
+     * On-demand download for reader detail view:
+     * If an image is missing or invalid locally, download via Apps Script GET <exec>?action=download&filename=<name>
+     */
+    fun downloadImageFile(filename: String): Boolean {
+        if (filename.isBlank()) return false
+        val builtInDrawables = setOf(
+            "img_hose_intro", "img_hose_types", "img_hose_fittings",
+            "img_hose_install", "img_hose_safety", "ic_hydraulic_hose"
+        )
+        if (filename in builtInDrawables) return true
+        val targetFile = File(contentDir, filename)
+        if (targetFile.exists() && isValidImageFile(targetFile)) return true
+
+        val uploadEndpoint = MMKVStorage.getDriveUploadEndpoint().trim()
+        val customUrl = MMKVStorage.getCustomSyncUrl().trim()
+        val folderId = extractFolderId(MMKVStorage.getFolderId())
+        return downloadFileFromAppsScript(uploadEndpoint, customUrl, folderId, filename, targetFile)
+    }
+
+    /**
+     * Admin: List files in configured Drive folder via Apps Script list action:
+     * GET <exec>?action=list&folderId=<id>
+     */
+    suspend fun listDriveFiles(folderId: String? = null): List<DriveFileInfo> = withContext(Dispatchers.IO) {
+        val targetFolderId = extractFolderId(folderId ?: MMKVStorage.getFolderId())
+        val uploadEndpoint = MMKVStorage.getDriveUploadEndpoint().trim()
+        val customUrl = MMKVStorage.getCustomSyncUrl().trim()
+        val endpoint = uploadEndpoint.ifBlank { customUrl }
+        if (endpoint.isBlank()) return@withContext emptyList()
+
+        val sep = if (endpoint.contains("?")) "&" else "?"
+        val folderParam = if (targetFolderId.isNotBlank()) "&folderId=$targetFolderId" else ""
+        val url = "$endpoint${sep}action=list$folderParam"
+
+        try {
+            val req = Request.Builder().url(url).build()
+            val resp = client.newCall(req).execute()
+            if (!resp.isSuccessful) return@withContext emptyList()
+            val body = resp.body?.string() ?: return@withContext emptyList()
+            val trimmed = body.trim()
+            val jsonArray = if (trimmed.startsWith("[")) {
+                JSONArray(trimmed)
+            } else if (trimmed.startsWith("{")) {
+                val obj = JSONObject(trimmed)
+                obj.optJSONArray("files") ?: obj.optJSONArray("items") ?: JSONArray()
+            } else {
+                JSONArray()
+            }
+
+            val list = mutableListOf<DriveFileInfo>()
+            for (i in 0 until jsonArray.length()) {
+                val item = jsonArray.optJSONObject(i) ?: continue
+                val name = item.optString("name").ifBlank { item.optString("fileName").ifBlank { item.optString("filename") } }
+                if (name.isBlank()) continue
+                val mimeType = item.optString("mimeType", "")
+                val size = item.optLong("size", 0L)
+                val modifiedTime = item.optString("modifiedTime").ifBlank { item.optString("updated").ifBlank { item.optString("date") } }
+                list.add(DriveFileInfo(name = name, mimeType = mimeType, size = size, modifiedTime = modifiedTime))
+            }
+            list.sortedByDescending { it.modifiedTime }
+        } catch (e: Exception) {
+            Log.e("SyncRepository", "Error listing drive files", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * Admin: Trash/delete file in Drive via Apps Script delete action:
+     * GET <exec>?action=delete&filename=<name>&folderId=<id>
+     */
+    suspend fun deleteDriveFile(filename: String, folderId: String? = null): Boolean = withContext(Dispatchers.IO) {
+        val targetFolderId = extractFolderId(folderId ?: MMKVStorage.getFolderId())
+        val uploadEndpoint = MMKVStorage.getDriveUploadEndpoint().trim()
+        val customUrl = MMKVStorage.getCustomSyncUrl().trim()
+        val endpoint = uploadEndpoint.ifBlank { customUrl }
+        if (endpoint.isBlank() || filename.isBlank()) return@withContext false
+
+        val sep = if (endpoint.contains("?")) "&" else "?"
+        val folderParam = if (targetFolderId.isNotBlank()) "&folderId=$targetFolderId" else ""
+        val encFilename = try {
+            java.net.URLEncoder.encode(filename, "UTF-8")
+        } catch (_: Exception) {
+            filename
+        }
+        val url = "$endpoint${sep}action=delete&filename=$encFilename$folderParam"
+
+        try {
+            val req = Request.Builder().url(url).build()
+            val resp = client.newCall(req).execute()
+            val isOk = resp.isSuccessful
+            if (isOk) {
+                val localFile = File(contentDir, filename)
+                if (localFile.exists()) {
+                    localFile.delete()
+                }
+                MMKVStorage.removeFromFileList(filename)
+            }
+            isOk
+        } catch (e: Exception) {
+            Log.e("SyncRepository", "Error deleting drive file $filename", e)
+            false
+        }
     }
 
     fun clearSavedData(): Boolean {

@@ -80,6 +80,15 @@ fun DetailScreen(
 
     val allChapters by viewModel.allChapters.collectAsState()
     val fontScale by viewModel.fontScale.collectAsState()
+    val downloadingImages by viewModel.downloadingImages.collectAsState()
+
+    androidx.compose.runtime.LaunchedEffect(chapter) {
+        viewModel.requestImageDownload(chapter.thumbnail)
+        viewModel.requestImageDownload(chapter.secondImage)
+        chapter.sections.forEach { sec ->
+            viewModel.requestImageDownload(sec.image)
+        }
+    }
 
     // Determine prev / next chapter for continuous reading
     val currentIndex = allChapters.indexOfFirst { it.id == chapter.id }
@@ -272,6 +281,8 @@ fun DetailScreen(
                             ChapterThumbnail(
                                 imageName = chapter.thumbnail,
                                 contentDescription = chapter.title,
+                                isLoading = downloadingImages.contains(chapter.thumbnail),
+                                onRequestDownload = { viewModel.requestImageDownload(chapter.thumbnail) },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .aspectRatio(16f / 9f)
@@ -300,7 +311,9 @@ fun DetailScreen(
             items(chapter.sections) { section ->
                 SectionItem(
                     section = section,
-                    fontScale = fontScale
+                    fontScale = fontScale,
+                    isImageLoading = downloadingImages.contains(section.image),
+                    onRequestImageDownload = { viewModel.requestImageDownload(section.image) }
                 )
                 Spacer(modifier = Modifier.height(24.dp))
             }
@@ -320,6 +333,8 @@ fun DetailScreen(
                             ChapterThumbnail(
                                 imageName = chapter.secondImage,
                                 contentDescription = "Figure 2: ${chapter.title}",
+                                isLoading = downloadingImages.contains(chapter.secondImage),
+                                onRequestDownload = { viewModel.requestImageDownload(chapter.secondImage) },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .aspectRatio(16f / 9f)
@@ -410,7 +425,9 @@ fun DetailScreen(
 fun SectionItem(
     section: ChapterSection,
     fontScale: Float,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isImageLoading: Boolean = false,
+    onRequestImageDownload: (() -> Unit)? = null
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
         // Section heading
@@ -441,6 +458,8 @@ fun SectionItem(
                     ChapterThumbnail(
                         imageName = section.image,
                         contentDescription = section.caption ?: section.heading,
+                        isLoading = isImageLoading,
+                        onRequestDownload = onRequestImageDownload,
                         modifier = Modifier
                             .fillMaxWidth()
                             .aspectRatio(16f / 9f)

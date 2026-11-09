@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
@@ -101,6 +102,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.model.Chapter
 import com.example.model.ChapterSection
+import com.example.model.DriveFileInfo
 import com.example.ui.components.ChapterThumbnail
 import com.example.ui.theme.AccentBlue
 import com.example.ui.theme.BackgroundLight
@@ -157,6 +159,7 @@ fun AdminScreen(
 
     // Deletion dialog state
     var chapterToDelete by remember { mutableStateOf<Chapter?>(null) }
+    var confirmDriveDeleteTarget by remember { mutableStateOf<Chapter?>(null) }
 
     // Photo picker launcher (Zero-permission Android Photo Picker)
     val photoPickerLauncher = rememberLauncherForActivityResult(
@@ -353,6 +356,16 @@ fun AdminScreen(
                     text = { Text("PIN Security", fontWeight = FontWeight.Bold) },
                     modifier = Modifier.testTag("admin_tab_security")
                 )
+                Tab(
+                    selected = selectedAdminTab == 4,
+                    onClick = {
+                        viewModel.onAdminInteraction()
+                        selectedAdminTab = 4
+                        viewModel.loadDriveFiles()
+                    },
+                    text = { Text("Drive Files", fontWeight = FontWeight.Bold) },
+                    modifier = Modifier.testTag("admin_tab_drive_files")
+                )
             }
 
             // Tab Content
@@ -509,39 +522,115 @@ fun AdminScreen(
                         }
                     )
                 }
+                4 -> {
+                    // Drive Files
+                    AdminDriveFilesView(
+                        viewModel = viewModel,
+                        onShowSnackbar = { msg ->
+                            scope.launch { snackbarHostState.showSnackbar(msg) }
+                        }
+                    )
+                }
             }
         }
     }
 
-    // Delete Confirmation Dialog
+    // Article Delete Confirmation Dialog (offers local-only default vs Drive delete)
     if (chapterToDelete != null) {
         val target = chapterToDelete!!
         AlertDialog(
             onDismissRequest = { chapterToDelete = null },
-            title = { Text("Delete Article?") },
+            title = { Text("ဆောင်းပါးဖျက်မည် (Delete Article)") },
             text = {
-                Text("Are you sure you want to delete '${target.title}'? This removes it from this device only. The copy in Google Drive is kept, and you can bring it back with Restore from Drive.")
+                Column {
+                    Text(
+                        text = "'${target.title}' ကို မည်သို့ ဖျက်လိုပါသလဲ?",
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "• ဖုန်းထဲမှာပဲ ဖျက် (Default): ဤဖုန်းမှသာ ဖျက်ပါမည်။ Google Drive ပေါ်တွင် မူရင်းဖိုင်များ ကျန်ရှိနေမည်ဖြစ်ပြီး လိုအပ်ပါက Restore ပြန်လုပ်နိုင်ပါသည်။",
+                        fontSize = 13.sp,
+                        color = TextSecondary
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "• Drive ထဲကပါ ဖျက်: ဖုန်းမှ ဖျက်မည့်အပြင် Google Drive ပေါ်ရှိ content.json နှင့် ပုံဖိုင်များကိုပါ အပြီးဖျက်ပါမည်။",
+                        fontSize = 13.sp,
+                        color = WarningRed
+                    )
+                }
             },
             confirmButton = {
+                // Local only is the default action
                 Button(
                     onClick = {
-                        viewModel.deleteArticle(target.id) { msg ->
+                        viewModel.deleteArticle(target.id, alsoDeleteFromDrive = false) { msg ->
                             scope.launch { snackbarHostState.showSnackbar(msg) }
                         }
                         chapterToDelete = null
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = WarningRed),
-                    modifier = Modifier.testTag("confirm_delete_article_button")
+                    colors = ButtonDefaults.buttonColors(containerColor = NavyPrimary),
+                    modifier = Modifier.testTag("confirm_delete_local_button")
                 ) {
-                    Text("Delete")
+                    Text("ဖုန်းထဲမှာပဲ ဖျက်")
+                }
+            },
+            dismissButton = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(
+                        onClick = {
+                            confirmDriveDeleteTarget = target
+                            chapterToDelete = null
+                        },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = WarningRed),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, WarningRed),
+                        modifier = Modifier.testTag("request_delete_drive_button")
+                    ) {
+                        Text("Drive ထဲကပါ ဖျက်")
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    TextButton(
+                        onClick = { chapterToDelete = null },
+                        modifier = Modifier.testTag("cancel_delete_article_button")
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+            }
+        )
+    }
+
+    // Drive delete confirmation dialog (Drive delete must always ask first)
+    if (confirmDriveDeleteTarget != null) {
+        val target = confirmDriveDeleteTarget!!
+        AlertDialog(
+            onDismissRequest = { confirmDriveDeleteTarget = null },
+            title = { Text("Drive ထဲကပါ အပြီးဖျက်ရန် အတည်ပြုပါ") },
+            text = {
+                Text("Drive ထဲက ဖိုင်ကို အပြီးဖျက်မလား?\n\n'${target.title}' နှင့် ပတ်သက်သော content.json နှင့် ပုံဖိုင်များကို Google Drive မှ အပြီးဖျက်ပါမည်။")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.deleteArticle(target.id, alsoDeleteFromDrive = true) { msg ->
+                            scope.launch { snackbarHostState.showSnackbar(msg) }
+                        }
+                        confirmDriveDeleteTarget = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = WarningRed),
+                    modifier = Modifier.testTag("confirm_delete_drive_button")
+                ) {
+                    Text("Drive မှ အပြီးဖျက်မည်")
                 }
             },
             dismissButton = {
                 TextButton(
-                    onClick = { chapterToDelete = null },
-                    modifier = Modifier.testTag("cancel_delete_article_button")
+                    onClick = { confirmDriveDeleteTarget = null },
+                    modifier = Modifier.testTag("cancel_drive_delete_button")
                 ) {
-                    Text("Cancel")
+                    Text("မဖျက်တော့ပါ")
                 }
             }
         )
@@ -1642,5 +1731,391 @@ fun AdminSecuritySettingsView(
             }
             Spacer(modifier = Modifier.height(30.dp))
         }
+    }
+}
+
+@Composable
+fun AdminDriveFilesView(
+    viewModel: EbookViewModel,
+    onShowSnackbar: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val driveFiles by viewModel.driveFiles.collectAsState()
+    val isLoading by viewModel.isLoadingDriveFiles.collectAsState()
+    val errorMsg by viewModel.driveFilesError.collectAsState()
+    val folderId by viewModel.folderId.collectAsState()
+    val isOffline by viewModel.isOffline.collectAsState()
+
+    var fileToDelete by remember { mutableStateOf<DriveFileInfo?>(null) }
+
+    LazyColumn(
+        modifier = modifier
+            .fillMaxSize()
+            .testTag("admin_drive_files_view"),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // Header card
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceWhite),
+                border = androidx.compose.foundation.BorderStroke(1.dp, OutlineBorder)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Google Drive Folder Files",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = NavyDark
+                                )
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Folder ID: $folderId",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    color = TextSecondary,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        IconButton(
+                            onClick = {
+                                viewModel.onAdminInteraction()
+                                viewModel.loadDriveFiles()
+                            },
+                            enabled = !isLoading,
+                            modifier = Modifier.testTag("refresh_drive_files_button")
+                        ) {
+                            if (isLoading) {
+                                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh Files", tint = NavyPrimary)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            color = if (isOffline) OfflineAmber.copy(alpha = 0.15f) else OnlineGreen.copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Text(
+                                text = if (isOffline) "Offline" else "Online • Ready",
+                                color = if (isOffline) OfflineAmber else OnlineGreen,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+
+                        Text(
+                            text = "${driveFiles.size} file(s) found",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = TextSecondary
+                        )
+                    }
+                }
+            }
+        }
+
+        if (isLoading && driveFiles.isEmpty()) {
+            item {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 40.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = NavyPrimary)
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text("Loading files from Google Drive...", color = TextSecondary, fontSize = 13.sp)
+                    }
+                }
+            }
+        } else if (!errorMsg.isNullOrBlank() && driveFiles.isEmpty()) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFEF2F2)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFCA5A5))
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "Error Loading Drive Files",
+                            fontWeight = FontWeight.Bold,
+                            color = WarningRed
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(text = errorMsg ?: "", fontSize = 13.sp, color = TextPrimary)
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = {
+                                viewModel.onAdminInteraction()
+                                viewModel.loadDriveFiles()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = NavyPrimary)
+                        ) {
+                            Text("Retry")
+                        }
+                    }
+                }
+            }
+        } else if (driveFiles.isEmpty()) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = SurfaceWhite),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, OutlineBorder)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Folder,
+                            contentDescription = null,
+                            tint = TextSecondary.copy(alpha = 0.5f),
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "No files found in Drive folder",
+                            fontWeight = FontWeight.SemiBold,
+                            color = TextPrimary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Tap refresh to check the Apps Script list endpoint.",
+                            fontSize = 12.sp,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Button(
+                            onClick = {
+                                viewModel.onAdminInteraction()
+                                viewModel.loadDriveFiles()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = NavyPrimary)
+                        ) {
+                            Text("Refresh Now")
+                        }
+                    }
+                }
+            }
+        } else {
+            items(driveFiles, key = { it.name }) { file ->
+                DriveFileItemCard(
+                    file = file,
+                    onDelete = { fileToDelete = file }
+                )
+            }
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(30.dp))
+        }
+    }
+
+    // Single file delete confirmation dialog
+    if (fileToDelete != null) {
+        val f = fileToDelete!!
+        AlertDialog(
+            onDismissRequest = { fileToDelete = null },
+            title = { Text("Drive ဖိုင်ဖျက်ရန် အတည်ပြုပါ") },
+            text = {
+                Column {
+                    Text(
+                        text = "Drive ထဲက ဖိုင်ကို အပြီးဖျက်မလား?",
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "ဖိုင်အမည်: ${f.name}",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        color = NavyDark
+                    )
+                    if (f.size > 0) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "ဖိုင်အရွယ်အစား: ${formatFileSize(f.size)}",
+                            fontSize = 12.sp,
+                            color = TextSecondary
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "ဤဖိုင်ကို Google Drive မှ အပြီးဖျက် (trash) ပါမည်။",
+                        fontSize = 13.sp,
+                        color = WarningRed
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val fileName = f.name
+                        fileToDelete = null
+                        viewModel.deleteDriveFile(fileName) { ok, msg ->
+                            onShowSnackbar(msg)
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = WarningRed),
+                    modifier = Modifier.testTag("confirm_delete_drive_file_btn")
+                ) {
+                    Text("ဖျက်မည် (Delete)")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { fileToDelete = null },
+                    modifier = Modifier.testTag("cancel_delete_drive_file_btn")
+                ) {
+                    Text("မဖျက်တော့ပါ (Cancel)")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun DriveFileItemCard(
+    file: DriveFileInfo,
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("drive_file_${file.name}"),
+        shape = RoundedCornerShape(10.dp),
+        colors = CardDefaults.cardColors(containerColor = SurfaceWhite),
+        border = androidx.compose.foundation.BorderStroke(1.dp, OutlineBorder)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Icon
+            val isImage = file.name.endsWith(".jpg", true) || file.name.endsWith(".png", true) ||
+                    file.name.endsWith(".webp", true) || file.mimeType.startsWith("image/")
+            val isJson = file.name.endsWith(".json", true) || file.mimeType.contains("json")
+
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(
+                        when {
+                            isImage -> AccentBlue.copy(alpha = 0.15f)
+                            isJson -> OnlineGreen.copy(alpha = 0.15f)
+                            else -> NavyDark.copy(alpha = 0.1f)
+                        }
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = when {
+                        isImage -> Icons.Default.Image
+                        isJson -> Icons.Default.Description
+                        else -> Icons.Default.Folder
+                    },
+                    contentDescription = null,
+                    tint = when {
+                        isImage -> AccentBlue
+                        isJson -> OnlineGreen
+                        else -> NavyDark
+                    },
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = file.name,
+                    style = MaterialTheme.typography.titleSmall.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = NavyDark
+                    ),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (file.size > 0) {
+                        Text(
+                            text = formatFileSize(file.size),
+                            fontSize = 11.sp,
+                            color = TextSecondary,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+
+                    if (file.modifiedTime.isNotBlank()) {
+                        Text(
+                            text = "• ${file.modifiedTime.take(10)}",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                    }
+                }
+            }
+
+            IconButton(
+                onClick = onDelete,
+                modifier = Modifier.testTag("delete_drive_file_btn_${file.name}")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = "Delete File",
+                    tint = WarningRed,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+    }
+}
+
+fun formatFileSize(bytes: Long): String {
+    if (bytes <= 0) return "0 B"
+    val kb = bytes / 1024.0
+    val mb = kb / 1024.0
+    return when {
+        mb >= 1.0 -> String.format(java.util.Locale.US, "%.1f MB", mb)
+        kb >= 1.0 -> String.format(java.util.Locale.US, "%.1f KB", kb)
+        else -> "$bytes B"
     }
 }
