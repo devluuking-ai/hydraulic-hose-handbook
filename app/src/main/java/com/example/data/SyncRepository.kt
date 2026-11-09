@@ -36,6 +36,14 @@ class SyncRepository(private val context: Context) {
         .followSslRedirects(true)
         .build()
 
+    private val imageDownloadClient = OkHttpClient.Builder()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(60, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+
     private val contentDir: File
         get() = File(context.filesDir, "hydraulic_content").apply {
             if (!exists()) mkdirs()
@@ -265,24 +273,56 @@ class SyncRepository(private val context: Context) {
         val now = System.currentTimeMillis()
         val safeTitle = article.title.lowercase().replace("[^a-z0-9]".toRegex(), "_").take(15)
 
-        // 1. Process slot 1 image
+        // 1. Process slot 1 image (compress to <= 1280px, quality 80, < 1MB)
         var updatedThumbnail = article.thumbnail
         if (imageBytes1 != null && imageBytes1.isNotEmpty()) {
+            val compressed1 = com.example.util.ImageCompressor.compressBytes(imageBytes1)
             val imgFileName1 = "art_${safeTitle}_1_${now}.$imageExtension1"
             val imgFile1 = File(contentDir, imgFileName1)
-            imgFile1.writeBytes(imageBytes1)
+            imgFile1.writeBytes(compressed1)
             updatedThumbnail = imgFileName1
             MMKVStorage.addToFileList(imgFileName1)
+        } else if (!updatedThumbnail.isNullOrBlank()) {
+            // Re-saving existing article: if existing image file is large (> 600 KB), re-compress in place
+            val existingFile1 = File(contentDir, updatedThumbnail)
+            if (existingFile1.exists() && existingFile1.length() > 600 * 1024L) {
+                try {
+                    val raw = existingFile1.readBytes()
+                    val compressed = com.example.util.ImageCompressor.compressBytes(raw)
+                    if (compressed.size < raw.size) {
+                        existingFile1.writeBytes(compressed)
+                        Log.i("SyncRepository", "Re-compressed existing thumbnail $updatedThumbnail (${raw.size} -> ${compressed.size} bytes)")
+                    }
+                } catch (e: Exception) {
+                    Log.w("SyncRepository", "Failed re-compressing existing thumbnail: ${e.message}")
+                }
+            }
         }
 
-        // 2. Process slot 2 image
+        // 2. Process slot 2 image (compress to <= 1280px, quality 80, < 1MB)
         var updatedSecondImage = article.secondImage
         if (imageBytes2 != null && imageBytes2.isNotEmpty()) {
+            val compressed2 = com.example.util.ImageCompressor.compressBytes(imageBytes2)
             val imgFileName2 = "art_${safeTitle}_2_${now}.$imageExtension2"
             val imgFile2 = File(contentDir, imgFileName2)
-            imgFile2.writeBytes(imageBytes2)
+            imgFile2.writeBytes(compressed2)
             updatedSecondImage = imgFileName2
             MMKVStorage.addToFileList(imgFileName2)
+        } else if (!updatedSecondImage.isNullOrBlank()) {
+            // Re-saving existing article: if existing image file is large (> 600 KB), re-compress in place
+            val existingFile2 = File(contentDir, updatedSecondImage)
+            if (existingFile2.exists() && existingFile2.length() > 600 * 1024L) {
+                try {
+                    val raw = existingFile2.readBytes()
+                    val compressed = com.example.util.ImageCompressor.compressBytes(raw)
+                    if (compressed.size < raw.size) {
+                        existingFile2.writeBytes(compressed)
+                        Log.i("SyncRepository", "Re-compressed existing second image $updatedSecondImage (${raw.size} -> ${compressed.size} bytes)")
+                    }
+                } catch (e: Exception) {
+                    Log.w("SyncRepository", "Failed re-compressing existing second image: ${e.message}")
+                }
+            }
         }
 
         // 3. Load existing chapters, replace or add
@@ -1077,67 +1117,120 @@ class SyncRepository(private val context: Context) {
         customUrl: String,
         folderId: String,
         filename: String,
-        targetFile: File
+        targetFile: File,
+        onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
     ): Boolean {
         val endpoint = uploadEndpoint.ifBlank { customUrl }
-        if (endpoint.isNotEmpty()) {
-            val sep = if (endpoint.contains("?")) "&" else "?"
-            val folderParam = if (folderId.isNotEmpty()) "&folderId=$folderId" else ""
-            val encFilename = try {
-                java.net.URLEncoder.encode(filename, "UTF-8")
-            } catch (_: Exception) {
-                filename
-            }
-            val url = "$endpoint${sep}action=download&filename=$encFilename$folderParam"
+        if (endpoint.isBlank()) return false
+
+        val sep = if (endpoint.contains("?")) "&" else "?"
+        val folderParam = if (folderId.isNotEmpty()) "&folderId=$folderId" else ""
+        val encFilename = try {
+            java.net.URLEncoder.encode(filename, "UTF-8")
+        } catch (_: Exception) {
+            filename
+        }
+        val url = "$endpoint${sep}action=download&filename=$encFilename$folderParam"
+        val tempFile = File(targetFile.parentFile ?: contentDir, "${targetFile.name}.part")
+
+        val maxAttempts = 3
+        for (attempt in 1..maxAttempts) {
             try {
                 val req = Request.Builder().url(url).build()
-                val resp = client.newCall(req).execute()
+                val resp = imageDownloadClient.newCall(req).execute()
                 if (resp.isSuccessful) {
-                    val rawBytes = resp.body?.bytes()
-                    if (rawBytes != null && rawBytes.size >= 12) {
-                        // 1. Skip HTML error or login pages
-                        if (rawBytes[0] == '<'.code.toByte()) {
-                            Log.w("SyncRepository", "Apps Script download returned HTML page instead of image for $filename")
-                            if (targetFile.exists()) targetFile.delete()
-                            return false
-                        }
+                    val body = resp.body
+                    if (body != null) {
+                        val declaredLength = body.contentLength()
+                        var bytesReadTotal = 0L
 
-                        // 2. Only base64-decode if the response body is actually a JSON/base64 wrapper
-                        val imageBytes: ByteArray = if (rawBytes[0] == '{'.code.toByte()) {
-                            try {
-                                val jsonStr = String(rawBytes, Charsets.UTF_8)
-                                val obj = JSONObject(jsonStr)
-                                val base64Str = obj.optString("base64").ifBlank { obj.optString("data") }
-                                if (base64Str.isNotBlank()) {
-                                    android.util.Base64.decode(base64Str, android.util.Base64.DEFAULT)
-                                } else {
-                                    Log.w("SyncRepository", "Apps Script reported error for $filename: ${obj.optString("message", "File not found")}")
-                                    if (targetFile.exists()) targetFile.delete()
-                                    return false
+                        try {
+                            body.byteStream().use { input ->
+                                FileOutputStream(tempFile).use { output ->
+                                    val buffer = ByteArray(8192)
+                                    var read: Int
+                                    while (input.read(buffer).also { read = it } != -1) {
+                                        output.write(buffer, 0, read)
+                                        bytesReadTotal += read
+                                        val total = if (declaredLength > 0) declaredLength else bytesReadTotal
+                                        onProgress?.invoke(bytesReadTotal, total)
+                                    }
+                                    output.flush()
                                 }
-                            } catch (_: Exception) {
-                                rawBytes
                             }
+                        } catch (e: Exception) {
+                            if (tempFile.exists()) tempFile.delete()
+                            throw e
+                        }
+
+                        if (tempFile.exists() && tempFile.length() >= 12) {
+                            val header = ByteArray(12)
+                            tempFile.inputStream().use { it.read(header) }
+
+                            // 1. Skip HTML error or login pages
+                            if (header[0] == '<'.code.toByte()) {
+                                Log.w("SyncRepository", "Apps Script download returned HTML page for $filename (attempt $attempt)")
+                                tempFile.delete()
+                                if (attempt < maxAttempts) {
+                                    Thread.sleep(attempt * 1000L)
+                                    continue
+                                }
+                                return false
+                            }
+
+                            // 2. Only base64-decode if the response body is actually a JSON/base64 wrapper
+                            val imageBytes: ByteArray = if (header[0] == '{'.code.toByte()) {
+                                try {
+                                    val jsonStr = tempFile.readText(Charsets.UTF_8)
+                                    val obj = JSONObject(jsonStr)
+                                    val base64Str = obj.optString("base64").ifBlank { obj.optString("data") }
+                                    if (base64Str.isNotBlank()) {
+                                        android.util.Base64.decode(base64Str, android.util.Base64.DEFAULT)
+                                    } else {
+                                        Log.w("SyncRepository", "Apps Script reported error for $filename: ${obj.optString("message", "File not found")}")
+                                        tempFile.delete()
+                                        return false
+                                    }
+                                } catch (_: Exception) {
+                                    tempFile.readBytes()
+                                }
+                            } else {
+                                // Raw blob bytes AS-IS
+                                tempFile.readBytes()
+                            }
+                            tempFile.delete()
+
+                            // 3. Validate image magic bytes (JPEG FF D8 FF / PNG / WEBP / GIF)
+                            if (!isRealImageBytes(imageBytes)) {
+                                Log.w("SyncRepository", "Corrupt or non-image data received for $filename (attempt $attempt)")
+                                if (attempt < maxAttempts) {
+                                    Thread.sleep(attempt * 1000L)
+                                    continue
+                                }
+                                return false
+                            }
+
+                            // 4. Save bytes unchanged to filesDir/hydraulic_content under exact filename
+                            targetFile.writeBytes(imageBytes)
+                            MMKVStorage.addToFileList(filename)
+                            Log.i("SyncRepository", "Successfully downloaded $filename (${imageBytes.size} bytes) on attempt $attempt")
+                            return true
                         } else {
-                            // Raw blob bytes AS-IS
-                            rawBytes
+                            if (tempFile.exists()) tempFile.delete()
                         }
-
-                        // 3. Validate image magic bytes (JPEG FF D8 FF / PNG / WEBP)
-                        if (!isRealImageBytes(imageBytes)) {
-                            Log.w("SyncRepository", "Corrupt or non-image data received for $filename, skipping file")
-                            if (targetFile.exists()) targetFile.delete()
-                            return false
-                        }
-
-                        // 4. Save bytes unchanged to filesDir/hydraulic_content under exact filename
-                        targetFile.writeBytes(imageBytes)
-                        MMKVStorage.addToFileList(filename)
-                        return true
                     }
                 }
             } catch (e: Exception) {
-                Log.w("SyncRepository", "Failed downloading image $filename: ${e.message}")
+                if (tempFile.exists()) tempFile.delete()
+                Log.w("SyncRepository", "Failed downloading image $filename (attempt $attempt of $maxAttempts): ${e.message}")
+            }
+
+            if (attempt < maxAttempts) {
+                try {
+                    Thread.sleep(attempt * 1000L)
+                } catch (_: InterruptedException) {
+                    break
+                }
             }
         }
         return false
@@ -1146,8 +1239,12 @@ class SyncRepository(private val context: Context) {
     /**
      * On-demand download for reader detail view:
      * If an image is missing or invalid locally, download via Apps Script GET <exec>?action=download&filename=<name>
+     * Includes 60s overall timeout, 3-attempt retry with backoff, and live progress reporting.
      */
-    fun downloadImageFile(filename: String): Boolean {
+    fun downloadImageFile(
+        filename: String,
+        onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
+    ): Boolean {
         if (filename.isBlank()) return false
         val builtInDrawables = setOf(
             "img_hose_intro", "img_hose_types", "img_hose_fittings",
@@ -1160,7 +1257,7 @@ class SyncRepository(private val context: Context) {
         val uploadEndpoint = MMKVStorage.getDriveUploadEndpoint().trim()
         val customUrl = MMKVStorage.getCustomSyncUrl().trim()
         val folderId = extractFolderId(MMKVStorage.getFolderId())
-        return downloadFileFromAppsScript(uploadEndpoint, customUrl, folderId, filename, targetFile)
+        return downloadFileFromAppsScript(uploadEndpoint, customUrl, folderId, filename, targetFile, onProgress)
     }
 
     /**

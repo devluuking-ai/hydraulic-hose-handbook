@@ -81,12 +81,13 @@ fun DetailScreen(
     val allChapters by viewModel.allChapters.collectAsState()
     val fontScale by viewModel.fontScale.collectAsState()
     val downloadingImages by viewModel.downloadingImages.collectAsState()
+    val downloadStates by viewModel.imageDownloadStates.collectAsState()
 
     androidx.compose.runtime.LaunchedEffect(chapter) {
-        viewModel.requestImageDownload(chapter.thumbnail)
-        viewModel.requestImageDownload(chapter.secondImage)
+        viewModel.requestImageDownload(chapter.thumbnail, forceRetry = false)
+        viewModel.requestImageDownload(chapter.secondImage, forceRetry = false)
         chapter.sections.forEach { sec ->
-            viewModel.requestImageDownload(sec.image)
+            viewModel.requestImageDownload(sec.image, forceRetry = false)
         }
     }
 
@@ -282,7 +283,9 @@ fun DetailScreen(
                                 imageName = chapter.thumbnail,
                                 contentDescription = chapter.title,
                                 isLoading = downloadingImages.contains(chapter.thumbnail),
-                                onRequestDownload = { viewModel.requestImageDownload(chapter.thumbnail) },
+                                downloadStatus = downloadStates[chapter.thumbnail],
+                                onRequestDownload = { viewModel.requestImageDownload(chapter.thumbnail, forceRetry = false) },
+                                onRetryDownload = { viewModel.requestImageDownload(chapter.thumbnail, forceRetry = true) },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .aspectRatio(16f / 9f)
@@ -313,7 +316,9 @@ fun DetailScreen(
                     section = section,
                     fontScale = fontScale,
                     isImageLoading = downloadingImages.contains(section.image),
-                    onRequestImageDownload = { viewModel.requestImageDownload(section.image) }
+                    downloadStatus = downloadStates[section.image],
+                    onRequestImageDownload = { viewModel.requestImageDownload(section.image, forceRetry = false) },
+                    onRetryImageDownload = { viewModel.requestImageDownload(section.image, forceRetry = true) }
                 )
                 Spacer(modifier = Modifier.height(24.dp))
             }
@@ -334,7 +339,9 @@ fun DetailScreen(
                                 imageName = chapter.secondImage,
                                 contentDescription = "Figure 2: ${chapter.title}",
                                 isLoading = downloadingImages.contains(chapter.secondImage),
-                                onRequestDownload = { viewModel.requestImageDownload(chapter.secondImage) },
+                                downloadStatus = downloadStates[chapter.secondImage],
+                                onRequestDownload = { viewModel.requestImageDownload(chapter.secondImage, forceRetry = false) },
+                                onRetryDownload = { viewModel.requestImageDownload(chapter.secondImage, forceRetry = true) },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .aspectRatio(16f / 9f)
@@ -427,7 +434,9 @@ fun SectionItem(
     fontScale: Float,
     modifier: Modifier = Modifier,
     isImageLoading: Boolean = false,
-    onRequestImageDownload: (() -> Unit)? = null
+    downloadStatus: com.example.model.ImageDownloadStatus? = null,
+    onRequestImageDownload: (() -> Unit)? = null,
+    onRetryImageDownload: (() -> Unit)? = null
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
         // Section heading
@@ -459,7 +468,9 @@ fun SectionItem(
                         imageName = section.image,
                         contentDescription = section.caption ?: section.heading,
                         isLoading = isImageLoading,
+                        downloadStatus = downloadStatus,
                         onRequestDownload = onRequestImageDownload,
+                        onRetryDownload = onRetryImageDownload,
                         modifier = Modifier
                             .fillMaxWidth()
                             .aspectRatio(16f / 9f)

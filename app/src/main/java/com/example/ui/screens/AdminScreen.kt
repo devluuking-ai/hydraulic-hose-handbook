@@ -103,6 +103,7 @@ import coil.request.ImageRequest
 import com.example.model.Chapter
 import com.example.model.ChapterSection
 import com.example.model.DriveFileInfo
+import com.example.util.ImageCompressor
 import com.example.ui.components.ChapterThumbnail
 import com.example.ui.theme.AccentBlue
 import com.example.ui.theme.BackgroundLight
@@ -430,27 +431,33 @@ fun AdminScreen(
                                 return@AdminArticleForm
                             }
 
-                            // Read image 1 bytes if picked
+                            // Read and compress image 1 (longest side max 1280px, JPEG quality 80, target ~200-500 KB)
                             var imageBytes1: ByteArray? = null
                             var imageExt1 = "jpg"
                             if (selectedImageUri1 != null) {
                                 try {
-                                    val stream: InputStream? = context.contentResolver.openInputStream(selectedImageUri1!!)
-                                    imageBytes1 = stream?.readBytes()
-                                    stream?.close()
+                                    imageBytes1 = ImageCompressor.compressFromUri(context, selectedImageUri1!!)
+                                    if (imageBytes1 == null) {
+                                        val stream: InputStream? = context.contentResolver.openInputStream(selectedImageUri1!!)
+                                        imageBytes1 = stream?.readBytes()
+                                        stream?.close()
+                                    }
                                 } catch (e: Exception) {
                                     e.printStackTrace()
                                 }
                             }
 
-                            // Read image 2 bytes if picked
+                            // Read and compress image 2 (longest side max 1280px, JPEG quality 80, target ~200-500 KB)
                             var imageBytes2: ByteArray? = null
                             var imageExt2 = "jpg"
                             if (selectedImageUri2 != null) {
                                 try {
-                                    val stream: InputStream? = context.contentResolver.openInputStream(selectedImageUri2!!)
-                                    imageBytes2 = stream?.readBytes()
-                                    stream?.close()
+                                    imageBytes2 = ImageCompressor.compressFromUri(context, selectedImageUri2!!)
+                                    if (imageBytes2 == null) {
+                                        val stream: InputStream? = context.contentResolver.openInputStream(selectedImageUri2!!)
+                                        imageBytes2 = stream?.readBytes()
+                                        stream?.close()
+                                    }
                                 } catch (e: Exception) {
                                     e.printStackTrace()
                                 }

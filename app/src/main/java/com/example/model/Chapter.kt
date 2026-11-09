@@ -49,3 +49,13 @@ data class DriveFileInfo(
     val size: Long = 0L,
     val modifiedTime: String = ""
 )
+
+data class ImageDownloadStatus(
+    val imageName: String,
+    val isDownloading: Boolean = false,
+    val progressPercent: Int = -1,
+    val bytesDownloaded: Long = 0L,
+    val totalBytes: Long = 0L,
+    val isError: Boolean = false,
+    val errorMessage: String? = null
+)

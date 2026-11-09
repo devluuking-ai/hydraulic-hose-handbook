@@ -6,15 +6,25 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -27,14 +37,17 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.R
+import com.example.model.ImageDownloadStatus
 import com.example.ui.theme.NavyDark
 import com.example.ui.theme.NavyPrimary
 import java.io.File
+import java.text.DecimalFormat
 
 @Composable
 fun ChapterThumbnail(
@@ -42,7 +55,9 @@ fun ChapterThumbnail(
     contentDescription: String,
     modifier: Modifier = Modifier,
     isLoading: Boolean = false,
-    onRequestDownload: (() -> Unit)? = null
+    downloadStatus: ImageDownloadStatus? = null,
+    onRequestDownload: (() -> Unit)? = null,
+    onRetryDownload: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val localFile = remember(imageName) {
@@ -54,9 +69,10 @@ fun ChapterThumbnail(
 
     val isBuiltIn = drawableResId != 0
     val hasValidFile = localFile != null && localFile.exists() && isValidImageFile(localFile)
+    val isError = downloadStatus?.isError == true
 
-    LaunchedEffect(imageName, hasValidFile) {
-        if (!imageName.isNullOrBlank() && !isBuiltIn && !hasValidFile) {
+    LaunchedEffect(imageName, hasValidFile, isError) {
+        if (!imageName.isNullOrBlank() && !isBuiltIn && !hasValidFile && !isError) {
             onRequestDownload?.invoke()
         }
     }
@@ -90,24 +106,115 @@ fun ChapterThumbnail(
                     modifier = Modifier.fillMaxSize()
                 )
             }
-            isLoading || (!imageName.isNullOrBlank() && !isBuiltIn) -> {
+            isError -> {
+                // Clear error state with retry button so downloads never spin indefinitely
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
-                    modifier = Modifier.padding(8.dp)
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(8.dp)
                 ) {
-                    CircularProgressIndicator(
-                        color = Color.White,
-                        strokeWidth = 2.5.dp,
-                        modifier = Modifier.size(28.dp)
+                    Icon(
+                        imageVector = Icons.Default.CloudOff,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.9f),
+                        modifier = Modifier.size(26.dp)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = downloadStatus?.errorMessage ?: "ပုံဆွဲ၍ မရပါ (Download failed)",
+                        color = Color.White.copy(alpha = 0.9f),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center,
+                        maxLines = 2
                     )
                     Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "Downloading image...",
-                        color = Color.White.copy(alpha = 0.85f),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium
-                    )
+                    Button(
+                        onClick = {
+                            onRetryDownload?.invoke() ?: onRequestDownload?.invoke()
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.White.copy(alpha = 0.25f),
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(14.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                        modifier = Modifier.height(30.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "ပြန်ဆွဲပါ (Retry)",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
+            isLoading || downloadStatus?.isDownloading == true || (!imageName.isNullOrBlank() && !isBuiltIn) -> {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(12.dp)
+                ) {
+                    val percent = downloadStatus?.progressPercent ?: -1
+                    val bytesRead = downloadStatus?.bytesDownloaded ?: 0L
+                    val totalBytes = downloadStatus?.totalBytes ?: 0L
+
+                    if (percent >= 0 && totalBytes > 0) {
+                        LinearProgressIndicator(
+                            progress = { (percent / 100f).coerceIn(0f, 1f) },
+                            modifier = Modifier
+                                .fillMaxWidth(0.75f)
+                                .height(4.dp),
+                            color = Color.White,
+                            trackColor = Color.White.copy(alpha = 0.25f)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Downloading image... $percent% (${formatBytes(bytesRead)} / ${formatBytes(totalBytes)})",
+                            color = Color.White.copy(alpha = 0.9f),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            textAlign = TextAlign.Center
+                        )
+                    } else if (bytesRead > 0) {
+                        CircularProgressIndicator(
+                            color = Color.White,
+                            strokeWidth = 2.5.dp,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Downloading image... (${formatBytes(bytesRead)})",
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    } else {
+                        CircularProgressIndicator(
+                            color = Color.White,
+                            strokeWidth = 2.5.dp,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Downloading image...",
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                 }
             }
             else -> {
@@ -119,6 +226,16 @@ fun ChapterThumbnail(
                 )
             }
         }
+    }
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0) return "0 B"
+    val df = DecimalFormat("#.#")
+    return when {
+        bytes >= 1024 * 1024 -> "${df.format(bytes.toDouble() / (1024 * 1024))} MB"
+        bytes >= 1024 -> "${df.format(bytes.toDouble() / 1024)} KB"
+        else -> "$bytes B"
     }
 }
 

@@ -11,6 +11,7 @@ import com.example.data.SyncRepository
 import com.example.data.SyncResult
 import com.example.model.Chapter
 import com.example.model.DriveFileInfo
+import com.example.model.ImageDownloadStatus
 import com.example.model.PendingUpload
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -20,6 +21,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -102,6 +104,9 @@ class EbookViewModel(application: Application) : AndroidViewModel(application) {
     // On-demand image downloading state for Reader detail view
     private val _downloadingImages = MutableStateFlow<Set<String>>(emptySet())
     val downloadingImages: StateFlow<Set<String>> = _downloadingImages
+
+    private val _imageDownloadStates = MutableStateFlow<Map<String, ImageDownloadStatus>>(emptyMap())
+    val imageDownloadStates: StateFlow<Map<String, ImageDownloadStatus>> = _imageDownloadStates
 
     // Admin Drive Files screen state
     private val _driveFiles = MutableStateFlow<List<DriveFileInfo>>(emptyList())
@@ -410,7 +415,7 @@ class EbookViewModel(application: Application) : AndroidViewModel(application) {
         saveArticle(article, imageBytes, imageExtension, null, "jpg", onComplete)
     }
 
-    fun requestImageDownload(imageName: String?) {
+    fun requestImageDownload(imageName: String?, forceRetry: Boolean = false) {
         if (imageName.isNullOrBlank()) return
         val builtInDrawables = setOf(
             "img_hose_intro", "img_hose_types", "img_hose_fittings",
@@ -418,18 +423,77 @@ class EbookViewModel(application: Application) : AndroidViewModel(application) {
         )
         if (imageName in builtInDrawables || imageName.startsWith("http")) return
         val targetFile = File(repository.getLocalContentDir(), imageName)
-        if (targetFile.exists() && repository.isValidImageFile(targetFile)) return
-        if (_downloadingImages.value.contains(imageName)) return
-        if (!repository.isOnline()) return
+        if (targetFile.exists() && repository.isValidImageFile(targetFile)) {
+            _imageDownloadStates.update { it - imageName }
+            return
+        }
+
+        val currentState = _imageDownloadStates.value[imageName]
+        if (currentState != null && currentState.isDownloading) return
+        if (currentState != null && currentState.isError && !forceRetry) return
+
+        if (!repository.isOnline()) {
+            _imageDownloadStates.update { current ->
+                current + (imageName to ImageDownloadStatus(
+                    imageName = imageName,
+                    isDownloading = false,
+                    progressPercent = -1,
+                    isError = true,
+                    errorMessage = "အင်တာနက် မရှိပါ (Offline)"
+                ))
+            }
+            return
+        }
 
         viewModelScope.launch(Dispatchers.IO) {
-            _downloadingImages.value = _downloadingImages.value + imageName
-            val success = repository.downloadImageFile(imageName)
-            _downloadingImages.value = _downloadingImages.value - imageName
+            _downloadingImages.update { it + imageName }
+            _imageDownloadStates.update { current ->
+                current + (imageName to ImageDownloadStatus(
+                    imageName = imageName,
+                    isDownloading = true,
+                    progressPercent = 0,
+                    bytesDownloaded = 0L,
+                    totalBytes = 0L,
+                    isError = false
+                ))
+            }
+
+            val success = repository.downloadImageFile(imageName) { bytesRead, totalBytes ->
+                val percent = if (totalBytes > 0) ((bytesRead * 100) / totalBytes).toInt().coerceIn(0, 100) else -1
+                _imageDownloadStates.update { current ->
+                    val st = current[imageName]
+                    if (st != null && st.isDownloading) {
+                        current + (imageName to st.copy(
+                            progressPercent = percent,
+                            bytesDownloaded = bytesRead,
+                            totalBytes = totalBytes
+                        ))
+                    } else current
+                }
+            }
+
+            _downloadingImages.update { it - imageName }
             if (success) {
+                _imageDownloadStates.update { current ->
+                    current - imageName
+                }
                 loadLocalChapters()
+            } else {
+                _imageDownloadStates.update { current ->
+                    current + (imageName to ImageDownloadStatus(
+                        imageName = imageName,
+                        isDownloading = false,
+                        progressPercent = -1,
+                        isError = true,
+                        errorMessage = "ဒေါင်းလုဒ် မအောင်မြင်ပါ (Download failed)"
+                    ))
+                }
             }
         }
+    }
+
+    fun requestImageDownload(imageName: String?) {
+        requestImageDownload(imageName, forceRetry = false)
     }
 
     // Admin Delete Article (supports local-only default and optional Drive deletion)
